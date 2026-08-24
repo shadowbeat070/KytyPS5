@@ -7,6 +7,40 @@ bool Translator::TranslateStateOperation(const IR::Instruction& inst) {
 	switch (inst.op) {
 		case IR::Opcode::SaveexecB32:
 		case IR::Opcode::SaveexecB64: {
+			if (current_logical_wave64) {
+				const auto old_low  = ir.GetExecLo();
+				const auto old_high = ir.GetExecHi();
+				const auto src_low  = ReadRawU32(inst.src[0]);
+				const auto src_high = inst.op == IR::Opcode::SaveexecB64
+				                          ? ReadRawU32(OffsetOperand(inst.src[0], 1))
+				                          : IR::U32(IR::Value(0u));
+				const auto apply    = [&](IR::U32 old_value, IR::U32 src_value) {
+					switch (inst.saveexec_mode) {
+						case IR::SaveexecMode::And: return ir.BitwiseAnd(old_value, src_value);
+						case IR::SaveexecMode::Andn1:
+							return ir.BitwiseAnd(old_value, ir.BitwiseNot(src_value));
+						case IR::SaveexecMode::Orn2:
+							return ir.BitwiseOr(ir.BitwiseNot(old_value), src_value);
+					}
+					return old_value;
+				};
+				const auto result_low = apply(old_low, src_low);
+				const auto result_high =
+				    inst.op == IR::Opcode::SaveexecB64 ? apply(old_high, src_high) : old_high;
+				if (inst.op == IR::Opcode::SaveexecB64) {
+					WriteU32Pair(inst.dst, {old_low, old_high});
+				} else {
+					WriteOperand(inst.dst, old_low);
+				}
+				ir.SetExecLo(result_low);
+				ir.SetExecHi(result_high);
+				ir.SetExec(ThreadBit(result_low, result_high));
+				const auto nonzero = inst.op == IR::Opcode::SaveexecB64
+				                         ? ir.BitwiseOr(result_low, result_high)
+				                         : result_low;
+				ir.SetScc(ir.INotEqual(nonzero, IR::U32(IR::Value(0u))));
+				return true;
+			}
 			const auto old = ir.GetExec();
 			const auto src = ReadMask(inst.src[0]);
 			IR::U1     result;
@@ -121,7 +155,9 @@ bool Translator::TranslateControlOperation(const IR::Instruction& inst) {
 		case IR::Opcode::ControlNop: ir.Emit(IR::ValueOpcode::ControlNop); return true;
 		case IR::Opcode::Waitcnt: ir.Emit(IR::ValueOpcode::Waitcnt); return true;
 		case IR::Opcode::Barrier: ir.Emit(IR::ValueOpcode::Barrier); return true;
-		case IR::Opcode::Sendmsg: ir.Emit(IR::ValueOpcode::Sendmsg); return true;
+		case IR::Opcode::Sendmsg:
+			ir.Emit(IR::ValueOpcode::Sendmsg, {ir.GetM0()});
+			return true;
 		case IR::Opcode::TtraceData: ir.Emit(IR::ValueOpcode::TtraceData); return true;
 		case IR::Opcode::InstPrefetch: ir.Emit(IR::ValueOpcode::InstPrefetch); return true;
 		default: return false;
@@ -130,18 +166,20 @@ bool Translator::TranslateControlOperation(const IR::Instruction& inst) {
 
 bool Translator::TranslateMove(const IR::Instruction& inst) {
 	switch (inst.op) {
-		case IR::Opcode::MoveU32:
-			if (inst.src[0].kind == IR::OperandKind::Register &&
-			    (inst.src[0].reg.file == IR::RegisterFile::Exec ||
-			     inst.src[0].reg.file == IR::RegisterFile::Vcc) &&
-			    inst.dst.kind == IR::OperandKind::Register &&
-			    (inst.dst.reg.file == IR::RegisterFile::Exec ||
-			     inst.dst.reg.file == IR::RegisterFile::Vcc)) {
+		case IR::Opcode::MoveU32: {
+			const auto is_whole_mask = [](const IR::Operand& operand) {
+				return operand.kind == IR::OperandKind::Register &&
+				       (operand.reg.file == IR::RegisterFile::Exec ||
+				        operand.reg.file == IR::RegisterFile::Vcc) &&
+				       operand.reg.index == 0;
+			};
+			if (is_whole_mask(inst.src[0]) && is_whole_mask(inst.dst)) {
 				WriteMask(inst.dst, ReadMask(inst.src[0]));
 			} else {
 				WriteOperand(inst.dst, ReadOperand(inst.src[0], IR::Type::U32));
 			}
 			return true;
+		}
 		case IR::Opcode::MoveF32Bits:
 			WriteOperand(inst.dst, ReadOperand(inst.src[0], IR::Type::F32));
 			return true;

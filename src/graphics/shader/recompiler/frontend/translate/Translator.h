@@ -10,9 +10,9 @@ namespace Libs::Graphics::ShaderRecompiler::Frontend::Detail {
 class Translator {
 public:
 	Translator(IR::ValueProgram& program, IR::Block* block, uint32_t vector_limit,
-	           uint32_t wave_size)
+	           uint32_t wave_size, bool logical_wave64 = false)
 	    : value_program(program), ir(block), current_vector_limit(vector_limit),
-	      current_wave_size(wave_size) {}
+	      current_wave_size(wave_size), current_logical_wave64(logical_wave64) {}
 
 	bool TranslateBlock(const IR::BasicBlock& source, std::string* error);
 	bool AddBranchCondition(const IR::BasicBlock& source, IR::ValueBlockInfo& info,
@@ -28,7 +28,7 @@ private:
 	IR::U32                ReadScalarCode(uint32_t code);
 	IR::U32                ApplyBitSourceModifiers(const IR::Operand& operand, IR::U32 value);
 	IR::Value              ReadOperand(const IR::Operand& operand, IR::Type type);
-	IR::U1                 ThreadBit(IR::U32 low);
+	IR::U1                 ThreadBit(IR::U32 low, IR::U32 high);
 	void                   WriteRawU32(const IR::Operand& operand, IR::U32 value);
 	IR::F32                ApplyF32ResultModifiers(const IR::Operand& operand, IR::F32 value);
 	void                   WriteOperand(const IR::Operand& operand, IR::Value value);
@@ -129,6 +129,7 @@ private:
 	uint32_t          current_pc           = 0;
 	uint32_t          current_vector_limit = 1;
 	uint32_t          current_wave_size    = 64;
+	bool              current_logical_wave64 = false;
 };
 
 } // namespace Libs::Graphics::ShaderRecompiler::Frontend::Detail

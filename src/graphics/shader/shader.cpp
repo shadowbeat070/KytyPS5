@@ -1,4 +1,5 @@
 #include "graphics/shader/shader.h"
+#include "graphics/shader/shaderMergedGeometry.h"
 
 #include "common/assert.h"
 #include "common/common.h"
@@ -12,6 +13,7 @@
 #include "graphics/guest_gpu/gpu_defs.h"
 #include "graphics/guest_gpu/graphicsRun.h"
 #include "graphics/guest_gpu/hardwareContext.h"
+#include "graphics/host_gpu/hostMemory.h"
 #include "graphics/host_gpu/renderer/renderContext.h"
 #include "graphics/shader/recompiler/ShaderRecompiler.h"
 #include "graphics/shader/recompiler/frontend/decode/ShaderDecoder.h"
@@ -50,11 +52,24 @@ namespace Libs::Graphics {
 namespace {
 
 constexpr uint32_t PsInputOffsetMask = 0x0000001fu;
-constexpr uint32_t PsInputFlatShade  = 0x00000400u;
 
 bool ReadShaderGuestMemory(void*, uint64_t address, uint32_t* value) {
 	return value != nullptr &&
 	       Libs::LibKernel::Memory::TryReadGpuCleanBacking(address, value, sizeof(*value));
+}
+
+bool ReadShaderMappedMemory(void*, uint64_t address, uint32_t* value) {
+	if (value == nullptr) {
+		return false;
+	}
+	if (Libs::LibKernel::Memory::HasGuestAddressSpace()) {
+		return Libs::LibKernel::Memory::TryReadBacking(address, value, sizeof(*value));
+	}
+	if (!HostMemoryRangeIsReadable(address, sizeof(*value))) {
+		return false;
+	}
+	std::memcpy(value, reinterpret_cast<const void*>(address), sizeof(*value));
+	return true;
 }
 
 } // namespace
@@ -82,15 +97,6 @@ uint32_t ShaderPixelParameterLocation(const ShaderPixelInputInfo& info,
 		used_locations[location] = true;
 	}
 	return ShaderPixelParameterMappedLocation(info, input);
-}
-
-bool ShaderPixelParameterIsFlat(const ShaderPixelInputInfo& info, uint32_t input) {
-	return input < info.input_num && (info.interpolator_settings[input] & PsInputFlatShade) != 0 &&
-	       !ShaderPixelParameterIsCustom(info, input);
-}
-
-bool ShaderPixelParameterIsCustom(const ShaderPixelInputInfo& info, uint32_t input) {
-	return input < 32u && (info.custom_interpolation_mask & (1u << input)) != 0;
 }
 
 struct ShaderBinaryInfo {
@@ -1452,6 +1458,150 @@ static void DumpShaderRecompilerOriginal(const char* type, uint64_t shader_hash,
 	}
 }
 
+static std::span<const uint32_t> MergedGeometryUserData(const HW::VertexShaderInfo& regs) {
+	const auto count =
+	    std::max(static_cast<uint32_t>(regs.gs_regs.rsrc2.user_sgpr), regs.gs_user_sgpr.count);
+	return {regs.gs_user_sgpr.value, count};
+}
+
+bool ShaderGetStaticInputInfoMS(const HW::VertexShaderInfo& regs, const HW::ShaderRegisters& sh,
+                                const MeshDispatch& dispatch, MeshInputTopology topology,
+                                bool indexed, ShaderVertexInputInfo& info, std::string* error) {
+	if (!ShaderGetStaticInputInfoVS(regs, sh, info)) {
+		return ShaderError::Fail(error, "could not read the ES half's resource bindings");
+	}
+	info.wave_size                     = 64;
+	info.mesh_vertices_per_workgroup   = dispatch.vertices_per_workgroup;
+	info.mesh_primitives_per_workgroup = dispatch.primitives_per_workgroup;
+	info.mesh_last_group_index         = dispatch.workgroup_count - 1;
+	info.mesh_last_vertices            = dispatch.last_vertices;
+	info.mesh_last_primitives          = dispatch.last_primitives;
+	info.mesh_output_vertices          = dispatch.output_vertices_per_workgroup;
+	info.mesh_output_primitives        = dispatch.output_primitives_per_workgroup;
+	info.mesh_topology                 = static_cast<uint32_t>(topology);
+	info.mesh_indexed                  = indexed;
+	info.mesh_lds_size_dwords          = MeshLdsDwords(regs.gs_regs.rsrc2.lds_size);
+	return true;
+}
+
+bool ShaderCompileSpirvMS(const HW::VertexShaderInfo& regs, ShaderVertexInputInfo& info,
+                          std::vector<uint32_t>& spirv, std::string* error) {
+	KYTY_PROFILER_FUNCTION(profiler::colors::Amber300);
+
+	spirv.clear();
+
+	if (regs.es_regs.data_addr == 0 || regs.gs_regs.data_addr == 0) {
+		return ShaderError::Fail(error, "a merged geometry pair needs both an ES and a GS address");
+	}
+
+	ShaderMappedData es_data;
+	ShaderMappedData gs_data;
+	if (!ShaderGetMappedData(regs.es_regs.data_addr, es_data) ||
+	    !ShaderGetMappedData(regs.gs_regs.data_addr, gs_data)) {
+		return ShaderError::Fail(error, "the ES or GS program is missing from ShaderMap");
+	}
+
+	MergedGeometryProgram merged;
+	if (!ShaderAssembleMergedGeometry(
+	        {reinterpret_cast<const uint32_t*>(regs.es_regs.data_addr),
+	         es_data.code_size_bytes / sizeof(uint32_t)},
+	        {reinterpret_cast<const uint32_t*>(regs.gs_regs.data_addr),
+	         gs_data.code_size_bytes / sizeof(uint32_t)},
+	        merged, error)) {
+		return false;
+	}
+
+	const auto user_data = MergedGeometryUserData(regs);
+	ShaderRecompiler::CompileOptions options;
+	options.stage       = ShaderType::Mesh;
+	options.wave_size   = info.wave_size;
+	options.shader_hash = regs.gs_regs.chksum;
+	options.shader_base                = regs.es_regs.data_addr;
+	options.user_data_base             = 8;
+	options.user_data_count            = static_cast<uint32_t>(user_data.size());
+	options.scratch_dwords             = info.scratch_size_dwords;
+	options.user_data                  = regs.gs_user_sgpr.value;
+	options.read_specialization_memory = ReadShaderGuestMemory;
+	options.read_memory                = ReadShaderMappedMemory;
+	options.push_constant_offset       = 0;
+	options.input_info.vertex          = &info;
+	options.dump_ir                    = ShaderRecompilerTextDumpEnabled();
+	options.early_dump                 = options.dump_ir;
+	options.dump_label                 = "ShaderRecompiler MS";
+
+	ShaderRecompiler::CompileResult result;
+	std::string                     recompile_error;
+	if (!ShaderRecompiler::TryRecompile(merged.code, options, result, &recompile_error)) {
+		return ShaderError::Fail(error, fmt::format("recompile failed: {}", recompile_error));
+	}
+	if (!SpirvValidateBinary("ShaderRecompiler MS", options.shader_hash, result.spirv)) {
+		DumpShaderRecompilerSpirv("ms", options.shader_hash, result.spirv);
+		return ShaderError::Fail(error, "SPIR-V validation failed");
+	}
+
+	DumpShaderRecompilerOriginal("ms", options.shader_hash, merged.code, result.decoded_dump);
+	info.stage.program =
+	    std::make_shared<const ShaderRecompiler::IR::Program>(std::move(result.program));
+	info.stage.resources =
+	    std::make_shared<const ShaderRecompiler::IR::ResourceSnapshot>(std::move(result.resources));
+	ApplyVertexOutputs(info, *info.stage.program);
+	spirv = std::move(result.spirv);
+	DumpShaderRecompilerSpirv("ms", options.shader_hash, spirv);
+	return true;
+}
+
+static bool TryUseMeshPermutation(const ShaderProgramPermutation& permutation,
+                                  const HW::VertexShaderInfo& regs, ShaderVertexInputInfo& info,
+                                  uint64_t shader_hash) {
+	std::string error;
+	if (!ShaderMaterializeStageRuntime(permutation.program, MergedGeometryUserData(regs),
+	                                   regs.es_regs.data_addr, info.stage, &error,
+	                                   ReadShaderGuestMemory)) {
+		return LogPermutationMismatch(permutation, "MS", shader_hash, error);
+	}
+	ApplyVertexOutputs(info, *permutation.program);
+	return true;
+}
+
+bool ShaderCompileInfoMS(const HW::VertexShaderInfo& regs, const HW::ShaderRegisters& sh,
+                         const MeshDispatch& dispatch, MeshInputTopology topology, bool indexed,
+                         ShaderVertexInputInfo& info, std::span<const uint32_t>& spirv,
+                         std::string* error) {
+	spirv = {};
+
+	if (!ShaderGetStaticInputInfoMS(regs, sh, dispatch, topology, indexed, info, error)) {
+		return false;
+	}
+	const auto shader_hash = regs.gs_regs.chksum;
+	const auto program_id  = ShaderGetIdVS(regs, info, false);
+	const auto key = MakeShaderStageProgramKey(ShaderType::Mesh, shader_hash, program_id);
+
+	{
+		std::scoped_lock lock(g_shader_program_cache_mutex);
+		if (auto iter = g_shader_program_cache.find(key); iter != g_shader_program_cache.end()) {
+			for (const auto& permutation: iter->second) {
+				if (TryUseMeshPermutation(*permutation, regs, info, shader_hash)) {
+					spirv = MakeShaderSpirvView(permutation->spirv);
+					LogShaderProgramCacheHit("MS", shader_hash,
+					                         static_cast<uint64_t>(spirv.size()));
+					return true;
+				}
+			}
+		}
+	}
+
+	std::vector<uint32_t> compiled_spirv;
+	if (!ShaderCompileSpirvMS(regs, info, compiled_spirv, error)) {
+		return false;
+	}
+
+	ShaderProgramPermutation permutation {};
+	permutation.spirv   = std::move(compiled_spirv);
+	permutation.program = info.stage.program;
+	spirv = AddShaderProgramPermutation("MS", shader_hash, key, std::move(permutation));
+	return true;
+}
+
 bool ShaderCompileSpirvVS(const HW::VertexShaderInfo& regs, const HW::ShaderRegisters& sh,
                           ShaderVertexInputInfo& input_info, std::vector<uint32_t>& spirv) {
 	KYTY_PROFILER_FUNCTION(profiler::colors::Amber300);
@@ -1471,6 +1621,7 @@ bool ShaderCompileSpirvVS(const HW::VertexShaderInfo& regs, const HW::ShaderRegi
 	options.scratch_dwords             = input_info.scratch_size_dwords;
 	options.user_data                  = regs.gs_user_sgpr.value;
 	options.read_specialization_memory = ReadShaderGuestMemory;
+	options.read_memory                = ReadShaderMappedMemory;
 	options.input_info.vertex          = &input_info;
 	options.dump_ir                    = ShaderRecompilerTextDumpEnabled();
 	options.early_dump                 = options.dump_ir;
@@ -1523,6 +1674,7 @@ bool ShaderCompileSpirvPS(const HW::PixelShaderInfo& regs, const HW::ShaderRegis
 	options.push_constant_offset       = input_info.push_constant_offset;
 	options.user_data                  = regs.ps_user_sgpr.value;
 	options.read_specialization_memory = ReadShaderGuestMemory;
+	options.read_memory                = ReadShaderMappedMemory;
 	options.input_info.pixel           = &input_info;
 	options.dump_ir                    = ShaderRecompilerTextDumpEnabled();
 	options.early_dump                 = options.dump_ir;
@@ -1572,6 +1724,7 @@ bool ShaderCompileSpirvCS(const HW::ComputeShaderInfo& regs, const HW::ShaderReg
 	options.scratch_dwords             = input_info.scratch_size_dwords;
 	options.user_data                  = regs.cs_user_sgpr.value;
 	options.read_specialization_memory = ReadShaderGuestMemory;
+	options.read_memory                = ReadShaderMappedMemory;
 	options.input_info.compute         = &input_info;
 	options.wave_size                  = input_info.wave_size;
 	options.dump_ir                    = ShaderRecompilerTextDumpEnabled();
@@ -1657,6 +1810,17 @@ ShaderId ShaderGetIdVS(const HW::VertexShaderInfo& regs, const ShaderVertexInput
 			ret.ids.push_back(r.attr_offsets[j]);
 		}
 	}
+
+	ret.ids.push_back(input_info.mesh_vertices_per_workgroup);
+	ret.ids.push_back(input_info.mesh_primitives_per_workgroup);
+	ret.ids.push_back(input_info.mesh_last_group_index);
+	ret.ids.push_back(input_info.mesh_last_vertices);
+	ret.ids.push_back(input_info.mesh_last_primitives);
+	ret.ids.push_back(input_info.mesh_output_vertices);
+	ret.ids.push_back(input_info.mesh_output_primitives);
+	ret.ids.push_back(input_info.mesh_topology);
+	ret.ids.push_back(static_cast<uint32_t>(input_info.mesh_indexed));
+	ret.ids.push_back(input_info.mesh_lds_size_dwords);
 
 	if (include_bind_specialization) {
 		EXIT_IF(!input_info.stage);

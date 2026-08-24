@@ -84,6 +84,14 @@ bool ValidateNativeProgram(const IR::Program& program, std::string* error) {
 	if (uses_flattened_runtime) {
 		Expect(Kind::FlattenedSrt);
 	}
+	if (program.values != nullptr &&
+	    std::ranges::any_of(program.values->blocks, [](const IR::Block* block) {
+		    return std::ranges::any_of(*block, [](const auto& inst) {
+			    return inst.GetOpcode() == IR::ValueOpcode::ReadMeshIndex;
+		    });
+	    })) {
+		Expect(Kind::MeshIndices);
+	}
 	if (program.bindings.ShaderDataDwords() != 0 && program.bindings.push_constant_size == 0) {
 		Expect(Kind::UserData);
 	}
@@ -238,7 +246,8 @@ bool AnalyzeProgramRequirements(IR::Program& program, std::string* error) {
 				if (kind != IR::ResourceKind::Lds && kind != IR::ResourceKind::Gds) {
 					return Fail(error, "shared operation has invalid resource kind");
 				}
-				if (program.stage != ShaderType::Compute && kind == IR::ResourceKind::Lds) {
+				if (program.stage != ShaderType::Compute && program.stage != ShaderType::Mesh &&
+				    kind == IR::ResourceKind::Lds) {
 					requirements.function_lds = true;
 				}
 				if (shared_access == IR::SharedAccess::Append ||
@@ -311,8 +320,9 @@ bool EmitProgram(const IR::Program& program, const IR::ResourceSnapshot& resourc
 	using namespace Emitter;
 
 	if (program.stage != ShaderType::Compute && program.stage != ShaderType::Vertex &&
-	    program.stage != ShaderType::Pixel) {
-		SetError(error, "binary SPIR-V emitter supports compute, vertex, and pixel shaders");
+	    program.stage != ShaderType::Pixel && program.stage != ShaderType::Mesh) {
+		SetError(error,
+		         "binary SPIR-V emitter supports compute, vertex, pixel, and mesh shaders");
 		return false;
 	}
 	if (!program.srt_plan_complete || !program.resource_tracking_complete ||
@@ -341,6 +351,8 @@ bool EmitProgram(const IR::Program& program, const IR::ResourceSnapshot& resourc
 	EmitterState state(program, resources, input_info);
 	state.stage     = program.stage;
 	state.wave_size = program.wave_size;
+	state.logical_wave64 =
+	    program.stage == ShaderType::Mesh && program.wave_size == LogicalWave64Lanes;
 	state.inputs.reserve(program.info.inputs.size());
 	state.outputs.reserve(program.info.outputs.size());
 	state.interface_variables.reserve(program.info.inputs.size() + program.info.outputs.size());

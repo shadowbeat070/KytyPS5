@@ -33,7 +33,10 @@ struct ComputeShaderInfo;
 struct ShaderRegisters;
 } // namespace HW
 
-enum class ShaderType { Unknown, Vertex, Pixel, Fetch, Compute };
+enum class ShaderType { Unknown, Vertex, Pixel, Fetch, Compute, Mesh };
+
+struct MeshDispatch;
+enum class MeshInputTopology;
 
 namespace ShaderRecompiler::IR {
 struct Program;
@@ -98,6 +101,20 @@ struct ShaderVertexInputInfo {
 	uint32_t                pa_cl_vs_out_cntl    = 0;
 	bool                    fetch_external      = false;
 	bool                    fetch_embedded      = false;
+	// Guest wave size for this stage, decoded from VGT_SHADER_STAGES_EN. Part of the shader id,
+	// so a wave32 and a wave64 build of one program never share a pipeline.
+	uint32_t                wave_size           = 64;
+
+	uint32_t                mesh_vertices_per_workgroup   = 0;
+	uint32_t                mesh_primitives_per_workgroup = 0;
+	uint32_t                mesh_last_group_index         = 0;
+	uint32_t                mesh_last_vertices            = 0;
+	uint32_t                mesh_last_primitives          = 0;
+	uint32_t                mesh_output_vertices          = 0;
+	uint32_t                mesh_output_primitives        = 0;
+	uint32_t                mesh_topology                 = 0;
+	bool                    mesh_indexed                  = false;
+	uint32_t                mesh_lds_size_dwords          = 0;
 };
 
 struct ShaderComputeInputInfo {
@@ -153,8 +170,18 @@ union ShaderStageInputInfo {
 uint32_t ShaderPixelParameterMappedLocation(const ShaderPixelInputInfo& info, uint32_t input);
 uint32_t ShaderPixelParameterLocation(const ShaderPixelInputInfo& info,
                                       std::span<const uint32_t> active_inputs, uint32_t input);
-bool     ShaderPixelParameterIsFlat(const ShaderPixelInputInfo& info, uint32_t input);
-bool     ShaderPixelParameterIsCustom(const ShaderPixelInputInfo& info, uint32_t input);
+inline constexpr uint32_t PsInputFlatShade = 0x00000400u;
+
+[[nodiscard]] inline bool ShaderPixelParameterIsCustom(const ShaderPixelInputInfo& info,
+                                                       uint32_t                    input) {
+	return input < 32u && (info.custom_interpolation_mask & (1u << input)) != 0;
+}
+
+[[nodiscard]] inline bool ShaderPixelParameterIsFlat(const ShaderPixelInputInfo& info,
+                                                     uint32_t                    input) {
+	return input < info.input_num && (info.interpolator_settings[input] & PsInputFlatShade) != 0 &&
+	       !ShaderPixelParameterIsCustom(info, input);
+}
 
 struct ShaderSharp {
 	uint16_t offset_dw : 15;
@@ -262,6 +289,16 @@ ShaderId ShaderGetIdPS(const HW::PixelShaderInfo& regs, const ShaderPixelInputIn
 ShaderId ShaderGetIdCS(const HW::ComputeShaderInfo& regs, const ShaderComputeInputInfo& input_info,
                        bool include_bind_specialization);
 // Returned SPIR-V spans are read-only views backed by the shader program cache.
+bool ShaderGetStaticInputInfoMS(const HW::VertexShaderInfo& regs, const HW::ShaderRegisters& sh,
+                                const MeshDispatch& dispatch, MeshInputTopology topology,
+                                bool indexed, ShaderVertexInputInfo& info, std::string* error);
+bool ShaderCompileSpirvMS(const HW::VertexShaderInfo& regs, ShaderVertexInputInfo& info,
+                          std::vector<uint32_t>& spirv, std::string* error);
+
+bool ShaderCompileInfoMS(const HW::VertexShaderInfo& regs, const HW::ShaderRegisters& sh,
+                         const MeshDispatch& dispatch, MeshInputTopology topology, bool indexed,
+                         ShaderVertexInputInfo& info, std::span<const uint32_t>& spirv,
+                         std::string* error);
 bool ShaderCompileInfoVS(const HW::VertexShaderInfo& regs, const HW::ShaderRegisters& sh,
                          ShaderVertexInputInfo& input_info, std::span<const uint32_t>& spirv);
 bool ShaderCompileInfoPS(const HW::PixelShaderInfo& regs, const HW::ShaderRegisters& sh,
