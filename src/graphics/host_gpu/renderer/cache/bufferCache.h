@@ -73,6 +73,7 @@ public:
 
 private:
 	friend struct BufferCacheTestAccess;
+	friend class TextureCache;
 
 	struct DownloadCopy;
 	using PageTable = MultiLevelPageTable<BufferId, CACHING_PAGEBITS, 40, 16>;
@@ -98,6 +99,7 @@ private:
 	void DownloadBufferMemory(std::span<const DownloadCopy> copies);
 	void WriteHostMemory(uint64_t vaddr, std::span<const uint8_t> data);
 	void ReadMemoryOnGpu(uint64_t vaddr, uint64_t size, bool is_write);
+	void DiscardGpuDirtyBytes(uint64_t vaddr, uint64_t size);
 
 	GraphicContext&                                   m_graphics;
 	CommandScheduler&                                 m_scheduler;

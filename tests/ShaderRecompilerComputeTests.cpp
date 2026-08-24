@@ -168,6 +168,11 @@ struct BufferCacheTestAccess {
   static bool IsBufferAllocated(const BufferCache &cache, BufferId id) {
     return cache.m_slot_buffers.is_allocated(id);
   }
+
+  static void DiscardGpuDirtyBytes(BufferCache &cache, uint64_t address,
+                                   uint64_t size) {
+    cache.DiscardGpuDirtyBytes(address, size);
+  }
 };
 
 struct StreamBufferTestAccess {
@@ -3245,6 +3250,21 @@ public:
               "CPU invalidation retired a reusable Buffer owner");
       resources.MapMemory(index_begin, index_span);
       resources.MapMemory(base + recycled_offset, index_page);
+
+      constexpr uint64_t ownership_offset = 0x400000;
+      const uint64_t image_bytes = base + ownership_offset + 0x100;
+      const uint64_t sibling_bytes = base + ownership_offset + 0x200;
+      MarkGpuWrite(image_bytes, sizeof(uint32_t));
+      MarkGpuWrite(sibling_bytes, sizeof(uint32_t));
+      cache.FillBuffer(image_bytes, sizeof(uint32_t), 0x11223344u, false);
+      cache.FillBuffer(sibling_bytes, sizeof(uint32_t), 0x55667788u, false);
+      BufferCacheTestAccess::DiscardGpuDirtyBytes(cache, image_bytes,
+                                                  sizeof(uint32_t));
+      Require(name, "image supersedes exact Buffer bytes",
+              !cache.HasGpuDirtyBytes(image_bytes, sizeof(uint32_t)) &&
+                  cache.HasGpuDirtyBytes(sibling_bytes, sizeof(uint32_t)) &&
+                  cache.IsRegionGpuModified(sibling_bytes, sizeof(uint32_t)),
+              "image ownership retained stale bytes or discarded a dirty sibling");
 
       MarkGpuWrite(base + first_offset, sizeof(first_value));
       MarkGpuWrite(base + second_offset, sizeof(second_value));
