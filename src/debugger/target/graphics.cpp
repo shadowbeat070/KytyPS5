@@ -102,6 +102,7 @@ const char* StageName(ShaderStage stage) {
 		case ShaderStage::Pixel: return "pixel";
 		case ShaderStage::Compute: return "compute";
 		case ShaderStage::Fetch: return "fetch";
+		case ShaderStage::Mesh: return "mesh";
 		case ShaderStage::Unknown: break;
 	}
 	return "unknown";
@@ -430,6 +431,67 @@ void RecordDraw(const DrawRecord& record) {
 	stored.index = static_cast<uint32_t>(g_current_frame.size());
 	g_current_frame.push_back(stored);
 	MatchDrawConditions(stored);
+}
+
+void MarkLastDrawGeometry(bool ngg_merged, bool mesh_active, bool mesh_indexed,
+                          uint32_t mesh_workgroups, uint32_t verts_per_wg, uint32_t prims_per_wg,
+                          uint32_t out_vertices, uint32_t out_primitives) {
+	if (!IsCapturing()) {
+		return;
+	}
+
+	const std::lock_guard lock(g_mutex);
+
+	if (g_current_frame.empty()) {
+		return;
+	}
+	auto& record           = g_current_frame.back();
+	record.ngg_merged      = ngg_merged;
+	record.mesh_active     = mesh_active;
+	record.mesh_indexed    = mesh_indexed;
+	record.mesh_workgroups = mesh_workgroups;
+	record.mesh_verts_per_wg   = verts_per_wg;
+	record.mesh_prims_per_wg   = prims_per_wg;
+	record.mesh_out_vertices   = out_vertices;
+	record.mesh_out_primitives = out_primitives;
+}
+
+void MarkLastDrawTargets(const DrawTargets& targets) {
+	if (!IsCapturing()) {
+		return;
+	}
+
+	const std::lock_guard lock(g_mutex);
+
+	if (g_current_frame.empty()) {
+		return;
+	}
+	auto& record           = g_current_frame.back();
+	record.targets_valid   = true;
+	record.color_count     = targets.color_count;
+	record.color_clears    = targets.color_clears;
+	record.color0_addr     = targets.color0_addr;
+	record.color0_clear    = targets.color0_clear;
+	record.color0_blend    = targets.color0_blend;
+	record.color0_srcblend = targets.color0_srcblend;
+	record.color0_dstblend = targets.color0_dstblend;
+	record.color0_combfcn  = targets.color0_combfcn;
+	record.has_depth       = targets.has_depth;
+	record.depth_clear     = targets.depth_clear;
+	record.color0_format        = targets.color0_format;
+	record.color0_meta_kind     = targets.color0_meta_kind;
+	record.color0_dcc_addr      = targets.color0_dcc_addr;
+	record.color0_cmask_addr    = targets.color0_cmask_addr;
+	record.color0_dcc_enable    = targets.color0_dcc_enable;
+	record.color0_cmask_fce     = targets.color0_cmask_fce;
+	record.color0_clear_word0   = targets.color0_clear_word0;
+	record.color0_meta_cleared  = targets.color0_meta_cleared;
+	record.render_width         = targets.render_width;
+	record.render_height        = targets.render_height;
+	record.color0_width         = targets.color0_width;
+	record.color0_height        = targets.color0_height;
+	record.viewport_w           = targets.viewport_w;
+	record.viewport_h           = targets.viewport_h;
 }
 
 void RecordSubmission(uint64_t submit_id, uint32_t queue_id, bool compute,

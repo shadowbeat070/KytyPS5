@@ -16,7 +16,7 @@
 // a separate piece of work; see docs/debugger-design.md.
 namespace Debugger::Graphics {
 
-enum class ShaderStage : uint8_t { Unknown, Vertex, Pixel, Compute, Fetch };
+enum class ShaderStage : uint8_t { Unknown, Vertex, Pixel, Compute, Fetch, Mesh };
 
 const char* StageName(ShaderStage stage);
 
@@ -88,9 +88,75 @@ struct DrawRecord {
 	uint64_t vs_address = 0;
 	uint64_t ps_address = 0;
 	uint64_t cs_address = 0;
+	bool     ngg_merged      = false;
+	bool     mesh_active     = false;
+	bool     mesh_indexed    = false;
+	uint32_t mesh_workgroups = 0;
+	uint32_t mesh_verts_per_wg   = 0;
+	uint32_t mesh_prims_per_wg   = 0;
+	uint32_t mesh_out_vertices   = 0;
+	uint32_t mesh_out_primitives = 0;
+	bool     targets_valid  = false;
+	uint32_t color_count    = 0;
+	uint32_t color_clears   = 0; // how many bound colour slots load as eClear
+	uint64_t color0_addr    = 0;
+	bool     color0_clear   = false;
+	bool     color0_blend   = false;
+	uint32_t color0_srcblend = 0;
+	uint32_t color0_dstblend = 0;
+	uint32_t color0_combfcn  = 0;
+	bool     has_depth      = false;
+	bool     depth_clear    = false;
+	uint32_t color0_format   = 0;
+	uint32_t color0_meta_kind = 0;
+	uint64_t color0_dcc_addr  = 0;
+	uint64_t color0_cmask_addr = 0;
+	bool     color0_dcc_enable   = false;
+	bool     color0_cmask_fce    = false;
+	uint32_t color0_clear_word0  = 0;
+	bool     color0_meta_cleared = false;
+	uint32_t render_width  = 0;
+	uint32_t render_height = 0;
+	uint32_t color0_width  = 0;
+	uint32_t color0_height = 0;
+	int32_t  viewport_w = 0;
+	int32_t  viewport_h = 0;
 };
 
 void RecordDraw(const DrawRecord& record);
+
+void MarkLastDrawGeometry(bool ngg_merged, bool mesh_active, bool mesh_indexed,
+                          uint32_t mesh_workgroups, uint32_t verts_per_wg, uint32_t prims_per_wg,
+                          uint32_t out_vertices, uint32_t out_primitives);
+
+struct DrawTargets {
+	uint32_t color_count     = 0;
+	uint32_t color_clears    = 0;
+	uint64_t color0_addr     = 0;
+	bool     color0_clear    = false;
+	bool     color0_blend    = false;
+	uint32_t color0_srcblend = 0;
+	uint32_t color0_dstblend = 0;
+	uint32_t color0_combfcn  = 0;
+	bool     has_depth       = false;
+	bool     depth_clear     = false;
+	uint32_t color0_format   = 0;
+	uint32_t color0_meta_kind = 0;
+	uint64_t color0_dcc_addr  = 0;
+	uint64_t color0_cmask_addr = 0;
+	bool     color0_dcc_enable   = false;
+	bool     color0_cmask_fce    = false;
+	uint32_t color0_clear_word0  = 0;
+	bool     color0_meta_cleared = false;
+	uint32_t render_width  = 0;
+	uint32_t render_height = 0;
+	uint32_t color0_width  = 0;
+	uint32_t color0_height = 0;
+	int32_t  viewport_w = 0;
+	int32_t  viewport_h = 0;
+};
+
+void MarkLastDrawTargets(const DrawTargets& targets);
 
 // Exact top-level PM4 streams for a submitted graphics/compute batch. These bytes are enough to
 // inspect and validate the command stream offline. They are deliberately not called executable

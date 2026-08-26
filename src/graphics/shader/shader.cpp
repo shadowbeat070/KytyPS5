@@ -1337,8 +1337,7 @@ static const char* ShaderStageLabel(ShaderType stage) {
 
 static Debugger::Graphics::ShaderStage DebuggerShaderStage(ShaderType stage) {
 	switch (stage) {
-		// A merged pair replaces the vertex stage, so the debugger files it as one.
-		case ShaderType::Mesh:
+		case ShaderType::Mesh: return Debugger::Graphics::ShaderStage::Mesh;
 		case ShaderType::Vertex: return Debugger::Graphics::ShaderStage::Vertex;
 		case ShaderType::Pixel: return Debugger::Graphics::ShaderStage::Pixel;
 		case ShaderType::Compute: return Debugger::Graphics::ShaderStage::Compute;

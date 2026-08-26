@@ -19,6 +19,7 @@
 #include "graphics/host_gpu/renderer/pipeline/shaderResourceBarrier.h"
 #include "graphics/host_gpu/renderer/render.h"
 #include "graphics/host_gpu/renderer/renderContext.h"
+#include "debugger/target/graphics.h"
 #include "graphics/host_gpu/vulkanCommon.h"
 #include "graphics/shader/recompiler/ir/ShaderIR.h"
 #include "graphics/shader/recompiler/ir/passes/ResourceMaterialization.h"
@@ -1439,6 +1440,57 @@ void RenderExecutor::ExecutePreparedDraw(uint64_t submit_id, CommandBuffer& buff
 	if (set_auto_debug) {
 		SetDrawDebugPhase(buffer, submit_id, draw, 0x400u);
 	}
+	if (Debugger::Graphics::IsCapturing()) {
+		Debugger::Graphics::DrawTargets targets {};
+		targets.color_count = state.color_count;
+		for (uint32_t i = 0; i < state.rendering.num_color_attachments; i++) {
+			if (state.rendering.color_attachments[i].is_clear) {
+				targets.color_clears++;
+			}
+		}
+		if (state.color_count > 0) {
+			targets.color0_addr  = state.color_info[0].base_addr;
+			targets.color0_clear = state.rendering.color_attachments[0].is_clear;
+			const auto& bc = buffer.GetRegisters().GetBlendControl(state.color_info[0].target_slot);
+			targets.color0_blend    = bc.enable;
+			targets.color0_srcblend = bc.color_srcblend;
+			targets.color0_dstblend = bc.color_destblend;
+			targets.color0_combfcn  = bc.color_comb_fcn;
+			const auto& rt0 = buffer.GetRegisters().GetRenderTarget(state.color_info[0].target_slot);
+			targets.color0_format     = static_cast<uint32_t>(state.color_info[0].format);
+			targets.color0_meta_kind  =
+			    static_cast<uint32_t>(state.color_info[0].desc.info.metadata.kind);
+			targets.color0_dcc_addr    = rt0.dcc_addr.addr;
+			targets.color0_cmask_addr  = rt0.cmask.addr;
+			targets.color0_dcc_enable  = rt0.info.dcc_compression_enable;
+			targets.color0_cmask_fce   = rt0.info.cmask_fast_clear_enable;
+			targets.color0_clear_word0 = rt0.clear_word0.word0;
+			targets.color0_meta_cleared =
+			    rt0.dcc_addr.addr != 0 &&
+			    m_context.GetTextureCache().IsMetaCleared(
+			        rt0.dcc_addr.addr, state.color_info[0].desc.view_info.base_layer);
+		}
+		const auto& gvp = buffer.GetRegisters().GetScreenViewport();
+		targets.viewport_w = static_cast<int32_t>(gvp.viewports[0].xscale * 2.0f);
+		targets.viewport_h = static_cast<int32_t>(gvp.viewports[0].yscale * 2.0f);
+		targets.render_width  = state.rendering.width;
+		targets.render_height = state.rendering.height;
+		if (state.color_count > 0) {
+			targets.color0_width  = state.color_info[0].extent.width;
+			targets.color0_height = state.color_info[0].extent.height;
+		}
+		targets.has_depth   = state.rendering.depth_stencil_attachment.has_depth;
+		targets.depth_clear = state.rendering.depth_stencil_attachment.depth_clear;
+		Debugger::Graphics::MarkLastDrawTargets(targets);
+	}
+
+	Debugger::Graphics::MarkLastDrawGeometry(
+	    buffer.GetRegisters().GetShaderStagesEn().IsNggMergedEsGs(), state.mesh.active,
+	    state.mesh.indexed, state.mesh.dispatch.workgroup_count,
+	    state.mesh.dispatch.vertices_per_workgroup, state.mesh.dispatch.primitives_per_workgroup,
+	    state.mesh.dispatch.output_vertices_per_workgroup,
+	    state.mesh.dispatch.output_primitives_per_workgroup);
+
 	m_context.GetCommandScheduler().BeginRendering(state.rendering);
 	vk_buffer.bindPipeline(vk::PipelineBindPoint::eGraphics, pipeline.pipeline);
 	if (set_auto_debug) {
