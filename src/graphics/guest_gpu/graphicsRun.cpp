@@ -949,6 +949,8 @@ void CommandProcessor::DrawIndexOffset(uint32_t index_offset, uint32_t index_cou
 	auto* index_addr = reinterpret_cast<const void*>(
 	    m_index_base_addr + static_cast<uint64_t>(index_offset) * index_size);
 
+	RecordDrawForDebugger(Debugger::Graphics::DrawKind::DrawIndexed, index_count, m_num_instances);
+
 	m_renderer.GetRenderExecutor().DrawIndex(m_submit_id, CurrentBuffer(), m_index_type_and_size,
 	                                         index_count, index_addr, flags, 1, m_num_instances);
 }
