@@ -5330,6 +5330,51 @@ public:
           texture_cache.IsMetaCleared(base + metadata_b, 0),
           "BufferCache fill did not publish an exact-address metadata clear");
 
+      // A DCC fast clear leaves the colour allocation stale and is normally materialized as a
+      // load-op clear the next time the surface is bound as an attachment. A surface that is
+      // fast-cleared and then only ever sampled -- a translucency layer on a frame that draws
+      // nothing into it -- never reaches that path, so the read must materialize it instead.
+      constexpr uint64_t dcc_sampled_data = 0x16000;
+      constexpr uint64_t dcc_sampled_meta = 0x16100;
+      auto MakeDccColor = [&] {
+        auto desc = MakeLinearDesc(base + dcc_sampled_data, 4 * sizeof(uint32_t),
+                                   vk::Format::eR16G16B16A16Sfloat,
+                                   Prospero::BufferFormat::k16_16_16_16Float,
+                                   Prospero::ImageType::kColor2D, {2, 1, 1}, 1, 8, 1);
+        desc.info.metadata.kind = ImageMetadataKind::Dcc;
+        // A colour target carries only the DCC base address, never its length.
+        desc.info.metadata.range = {base + dcc_sampled_meta, 0};
+        desc.view_info.usage = vk::ImageUsageFlagBits::eSampled |
+                               vk::ImageUsageFlagBits::eColorAttachment;
+        return desc;
+      };
+      auto dcc_sampled_target = MakeDccColor();
+      dcc_sampled_target.type = BindingType::RenderTarget;
+      const auto dcc_sampled_image = texture_cache.FindImage(dcc_sampled_target);
+      Require(name, "sampled DCC registration",
+              dcc_sampled_image &&
+                  texture_cache.FindRenderTarget(dcc_sampled_image,
+                                                 dcc_sampled_target) != nullptr &&
+                  texture_cache.IsMeta(base + dcc_sampled_meta),
+              "binding a DCC colour target did not register its metadata");
+      auto dcc_sampled_read = MakeDccColor();
+      Require(name, "register-backed DCC stays deferred on a read",
+              texture_cache.TryConsumeDccFill(base + dcc_sampled_meta, 0x80,
+                                              0x20202020) &&
+                  texture_cache.FindTexture(dcc_sampled_image, dcc_sampled_read) !=
+                      nullptr &&
+                  texture_cache.IsMetaCleared(base + dcc_sampled_meta, 0),
+              "a sampled binding consumed a DCC clear whose value it cannot know");
+      Require(name, "fixed DCC clear materialized on a read",
+              texture_cache.TryConsumeDccFill(base + dcc_sampled_meta, 0x80,
+                                              0x40404040) &&
+                  texture_cache.IsMetaCleared(base + dcc_sampled_meta, 0) &&
+                  texture_cache.FindTexture(dcc_sampled_image, dcc_sampled_read) !=
+                      nullptr &&
+                  !texture_cache.IsMetaCleared(base + dcc_sampled_meta, 0),
+              "a fast-cleared surface that is only ever sampled kept its stale "
+              "allocation");
+
       constexpr uint64_t partial_unmap_image_offset = 0x2700000;
       auto partial_unmap_image =
           MakeLinearDesc(base + partial_unmap_image_offset, 0x2000,

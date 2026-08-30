@@ -1592,6 +1592,55 @@ ImageId TextureCache::FindImageFromRange(uint64_t address, uint64_t size, bool e
 	return selected;
 }
 
+// A DCC fast clear leaves the colour allocation stale, and is normally materialized as a load-op
+// clear the next time the surface is bound as a colour attachment. A fast-cleared surface that is
+// only ever sampled never reaches that path, so apply the same deferred value here.
+bool TextureCache::MaterializeDeferredDccClear(ImageId id, Image& image) {
+	if (image.info.metadata.kind != ImageMetadataKind::Dcc || image.backing.image == nullptr ||
+	    image.depth_id || image.info.IsDepth() || image.info.samples != 1) {
+		return false;
+	}
+	const auto metadata_address = image.info.metadata.range.address;
+	if (metadata_address == 0 || m_scheduler.Current().IsInvalid()) {
+		return false;
+	}
+	uint32_t fill_value = 0;
+	if (!IsMetaClearedLocked(metadata_address, 0, &fill_value)) {
+		return false;
+	}
+	vk::ClearColorValue clear {};
+	if (!DecodeFixedDccClear(static_cast<uint8_t>(fill_value), image.backing.format, clear)) {
+		return false;
+	}
+	const auto layers = image.backing.layers;
+	if (layers == 0 || layers > 32) {
+		return false;
+	}
+	// A partially cleared surface must keep its pending state, as on the attachment path.
+	for (uint32_t layer = 1; layer < layers; layer++) {
+		if (!IsMetaClearedLocked(metadata_address, layer, nullptr)) {
+			return false;
+		}
+	}
+	auto& command = m_scheduler.Current();
+	command.EndRendering();
+	image.Transit(vk::ImageLayout::eTransferDstOptimal, vk::AccessFlagBits2::eTransferWrite, {},
+	              command.Handle());
+	const vk::ImageSubresourceRange range {vk::ImageAspectFlagBits::eColor, 0,
+	                                       VK_REMAINING_MIP_LEVELS, 0, layers};
+	command.Handle().clearColorImage(image.backing.image, vk::ImageLayout::eTransferDstOptimal,
+	                                 &clear, 1, &range);
+	for (uint32_t layer = 0; layer < layers; layer++) {
+		if (!TouchMetaLocked(metadata_address, layer, false)) {
+			EXIT("TextureCache: failed to consume a deferred DCC clear\n");
+		}
+	}
+	CommitGpuWrite(id, image);
+	RecordDebuggerImageEvent("clear", id, image, true,
+	                         "deferred DCC clear was materialized for a sampled surface");
+	return true;
+}
+
 vk::ImageView TextureCache::FindTexture(ImageId id, const ImageDesc& desc) {
 	std::scoped_lock lock {m_lock};
 	auto&            image = m_slot_images[id];
@@ -1611,7 +1660,7 @@ vk::ImageView TextureCache::FindTexture(ImageId id, const ImageDesc& desc) {
 		RefreshImage(id, desc);
 	}
 	switch (desc.type) {
-		case BindingType::Texture: break;
+		case BindingType::Texture: MaterializeDeferredDccClear(id, image); break;
 		case BindingType::Storage:
 			if (!image.info.data.Empty()) {
 				if (!image.registered) {
@@ -2200,9 +2249,8 @@ bool TextureCache::IsMeta(uint64_t address) {
 	return found != m_surface_metas.end() && found->second.type != MetaDataInfo::Type::PendingDcc;
 }
 
-bool TextureCache::IsMetaCleared(uint64_t address, uint32_t slice, uint32_t* fill_value) {
-	std::scoped_lock lock {m_lock};
-	const auto       found = m_surface_metas.find(address);
+bool TextureCache::IsMetaClearedLocked(uint64_t address, uint32_t slice, uint32_t* fill_value) {
+	const auto found = m_surface_metas.find(address);
 	if (found == m_surface_metas.end() || found->second.type == MetaDataInfo::Type::PendingDcc ||
 	    slice >= 32) {
 		return false;
@@ -2211,6 +2259,11 @@ bool TextureCache::IsMetaCleared(uint64_t address, uint32_t slice, uint32_t* fil
 		*fill_value = found->second.fill_value;
 	}
 	return (found->second.clear_mask & (1u << slice)) != 0;
+}
+
+bool TextureCache::IsMetaCleared(uint64_t address, uint32_t slice, uint32_t* fill_value) {
+	std::scoped_lock lock {m_lock};
+	return IsMetaClearedLocked(address, slice, fill_value);
 }
 
 bool TextureCache::ClearMeta(uint64_t address) {
@@ -2276,7 +2329,11 @@ bool TextureCache::TryConsumeDccFill(uint64_t address, uint64_t size, uint32_t f
 
 bool TextureCache::TouchMeta(uint64_t address, uint32_t slice, bool is_clear) {
 	std::scoped_lock lock {m_lock};
-	const auto       found = m_surface_metas.find(address);
+	return TouchMetaLocked(address, slice, is_clear);
+}
+
+bool TextureCache::TouchMetaLocked(uint64_t address, uint32_t slice, bool is_clear) {
+	const auto found = m_surface_metas.find(address);
 	if (found == m_surface_metas.end() || found->second.type == MetaDataInfo::Type::PendingDcc ||
 	    slice >= 32) {
 		return false;

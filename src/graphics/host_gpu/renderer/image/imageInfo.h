@@ -12,6 +12,8 @@
 #include <bit>
 #include <cmath>
 #include <cstdint>
+#include <string_view>
+#include <vulkan/vulkan_format_traits.hpp>
 
 namespace Libs::Graphics {
 
@@ -505,6 +507,52 @@ IsSupportedDisplayRenderTargetTileMode(Prospero::TileMode tile_mode) noexcept {
 		return false;
 	}
 	clear = value;
+	return true;
+}
+
+// A fixed DCC clear is a literal 0.0/1.0 per channel, so it can only be expressed through the
+// float union of vk::ClearColorValue; integer targets must be cleared through uint32/int32.
+[[nodiscard]] inline bool SupportsFixedDccClear(vk::Format format) {
+	const auto components = vk::componentCount(format);
+	if (components == 0 || vk::isCompressed(format)) {
+		return false;
+	}
+	for (uint8_t component = 0; component < components; component++) {
+		const std::string_view numeric = vk::componentNumericFormat(format, component);
+		if (numeric != "UNORM" && numeric != "SNORM" && numeric != "USCALED" &&
+		    numeric != "SSCALED" && numeric != "SFLOAT" && numeric != "UFLOAT" &&
+		    numeric != "SRGB") {
+			return false;
+		}
+	}
+	return true;
+}
+
+// `0x20` is deliberately absent: it means "use the colour target's packed clear register", which
+// only the attachment path can supply.
+[[nodiscard]] inline bool DecodeFixedDccClear(uint8_t code, vk::Format format,
+                                              vk::ClearColorValue& clear) {
+	vk::ClearColorValue next {};
+	switch (code) {
+		case 0x00: break;
+		case 0x40: next.float32[3] = 1.0f; break;
+		case 0x80:
+			next.float32[0] = 1.0f;
+			next.float32[1] = 1.0f;
+			next.float32[2] = 1.0f;
+			break;
+		case 0xc0:
+			next.float32[0] = 1.0f;
+			next.float32[1] = 1.0f;
+			next.float32[2] = 1.0f;
+			next.float32[3] = 1.0f;
+			break;
+		default: return false;
+	}
+	if (code != 0x00 && !SupportsFixedDccClear(format)) {
+		return false;
+	}
+	clear = next;
 	return true;
 }
 

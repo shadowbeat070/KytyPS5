@@ -13,37 +13,14 @@
 #include "graphics/host_gpu/renderer/renderContext.h"
 #include "graphics/host_gpu/vulkanCommon.h"
 
-#include <vulkan/vulkan_format_traits.hpp>
-
 #include <algorithm>
 #include <array>
 #include <atomic>
 #include <mutex>
-#include <string_view>
 
 namespace Libs::Graphics {
 
 static std::atomic<uint32_t> g_render_color_log_count = 0;
-
-// The fixed DCC clear codes (0x40/0x80/0xc0) encode a literal 0.0 or 1.0 per channel, so unlike
-// the register-backed code they need no packed decode and are not tied to a particular bit layout.
-// Any format whose Vulkan clear value is expressed through the float union can materialize them;
-// integer targets cannot, because their clear must be written through uint32/int32 instead.
-[[nodiscard]] static bool SupportsFixedDccClear(vk::Format format) {
-	const auto components = vk::componentCount(format);
-	if (components == 0 || vk::isCompressed(format)) {
-		return false;
-	}
-	for (uint8_t component = 0; component < components; component++) {
-		const std::string_view numeric = vk::componentNumericFormat(format, component);
-		if (numeric != "UNORM" && numeric != "SNORM" && numeric != "USCALED" &&
-		    numeric != "SSCALED" && numeric != "SFLOAT" && numeric != "UFLOAT" &&
-		    numeric != "SRGB") {
-			return false;
-		}
-	}
-	return true;
-}
 
 static void ResolveDccClearInfo(RenderColorInfo& info, vk::Format format, bool has_dcc,
                                 uint32_t packed_clear) {

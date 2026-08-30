@@ -159,6 +159,10 @@ private:
 	void CopyImageMip(ImageId destination, ImageId source, uint32_t mip, uint32_t layer);
 	void ValidateImageDesc(const ImageDesc& desc) const;
 
+	[[nodiscard]] bool IsMetaClearedLocked(uint64_t address, uint32_t slice, uint32_t* fill_value);
+	[[nodiscard]] bool TouchMetaLocked(uint64_t address, uint32_t slice, bool is_clear);
+	bool               MaterializeDeferredDccClear(ImageId id, Image& image);
+
 	void               InvalidateCpuAliases(uint64_t address, uint64_t size);
 	[[nodiscard]] bool TryDownloadImage(ImageId id);
 	void               ProcessDebuggerPreview();
