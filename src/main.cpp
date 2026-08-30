@@ -65,7 +65,8 @@ static void PrintUsage() {
 	::printf("  --profiler-direction <value>         None or Network.\n");
 	::printf("  --spirv-debug-printf <true|false>    Enable SPIR-V debug printf.\n");
 	::printf(
-	    "  --readback-linear-images <true|false> Read back writable linear images on submit.\n");
+	    "  --readback-linear-images <true|false> Publish GPU-written linear images back to guest\n"
+	    "                                       memory on submit (default true).\n");
 	::printf("  --playgo-hack                       Use the supplied PlayGo stub fallback.\n");
 #if KYTY_PLATFORM == KYTY_PLATFORM_WINDOWS
 	::printf("  --redzone                            Protect the guest SysV red zone (default).\n");

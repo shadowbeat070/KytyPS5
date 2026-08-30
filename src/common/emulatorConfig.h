@@ -51,17 +51,16 @@ struct ConfigOptions {
 	bool                   spirv_debug_printf_enabled  = false;
 	bool                   gpu_assisted_validation_enabled = false;
 	bool                   renderdoc_enabled           = false;
-	bool                   readback_linear_images      = false;
+	// A linear layout means the guest addresses the surface from the CPU. Without publication such
+	// a read returns whatever the allocation held before.
+	bool                   readback_linear_images      = true;
 	bool                   playgo_hack_enabled         = false;
 #if KYTY_PLATFORM == KYTY_PLATFORM_WINDOWS
-	// Off by default. Windows dispatches every exception by building its frame on the faulting
-	// thread's own stack, reaching to within sixteen bytes of rsp, and guest code is System V
-	// and keeps live data in the 128 bytes below rsp — so a GPU page-tracking fault taken at
-	// the guest's own stack pointer destroys that data. Measured: a fault at 0x90267ba56 with
-	// rsp=0x7ec2a2e88 zeroed [rsp-0x10], and the next instruction to reload that slot
-	// dereferenced the resulting null. The patcher below fixes that, but it rewrites tens of
-	// thousands of guest instructions, so it stays opt-in via --redzone.
-	bool red_zone_protection_enabled = false;
+	// Windows builds every exception frame on the faulting thread's own stack, to within sixteen
+	// bytes of rsp, while guest code is System V and keeps live data in the 128 bytes below rsp.
+	// Any GPU page-tracking fault destroys that data, so this is on by default; --no-redzone
+	// turns it off.
+	bool red_zone_protection_enabled = true;
 #endif
 	// Debugger. Nothing in the debugger subsystem arms unless `debugger_enabled` is set; every
 	// other option here implies it (see main.cpp).

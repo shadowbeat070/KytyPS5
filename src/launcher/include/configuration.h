@@ -102,7 +102,9 @@ public:
 	bool                   debugger_enabled            = false;
 	bool                   external_debugger_enabled   = false;
 #if defined(_WIN32)
-	bool red_zone_protection_enabled = false;
+	// Must match ConfigOptions in src/common/emulatorConfig.h, or a configuration that has never
+	// stored the setting silently passes --no-redzone.
+	bool red_zone_protection_enabled = true;
 #endif
 	QStringList host_input_mapping;
 
