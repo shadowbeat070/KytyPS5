@@ -89,6 +89,16 @@ uint32_t EmitBuiltinU32(ValueEmitContext& ctx, IR::StageInputKind kind, uint32_t
 		                           TypePointer(state, StorageClassInput, TypeF32(state)), pointer,
 		                           variable, ConstantU32(state, component)});
 		state.builder.AddFunction({OpLoad, TypeF32(state), value, pointer});
+		// The two conventions differ: the POS_W_FLOAT pixel input VGPR carries the interpolated
+		// clip W, while SPIR-V's gl_FragCoord.w holds 1/W. Invert component 3 so a guest reading
+		// SV_Position.w gets W and not its reciprocal.
+		if (component == 3) {
+			const auto inverted = state.builder.AllocateId();
+			state.builder.AddFunction(
+			    {OpFDiv, TypeF32(state), inverted, ConstantF32Value(state, 1.0F), value});
+			state.builder.AddFunction({OpBitcast, TypeU32(state), bits, inverted});
+			return bits;
+		}
 		state.builder.AddFunction({OpBitcast, TypeU32(state), bits, value});
 		return bits;
 	}
