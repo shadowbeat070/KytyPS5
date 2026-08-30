@@ -581,9 +581,20 @@ bool EmitProgram(EmitterState& state, const IR::Program& program, std::string* e
 	    {OpFunction, TypeVoid(state), state.main_func, FunctionControlNone, TypeFunction(state)});
 	EmitLabel(state, state.entry_label);
 	if (state.requirements.function_lds) {
-		state.builder.AddFunction(
-		    {OpVariable, TypeU32ArrayPointer(state, StorageClassFunction, LdsDwordCount(state)),
-		     state.lds_variable, StorageClassFunction});
+		// A Function-storage OpVariable is undefined without an initializer, unlike hardware LDS.
+		// Zero only at the proven size; zeroing the conservative fallback would cost too much.
+		const auto dwords       = LdsDwordCount(state);
+		const auto pointer_type = TypeU32ArrayPointer(state, StorageClassFunction, dwords);
+		if (!LdsHasProvenSize(state)) {
+			state.builder.AddFunction(
+			    {OpVariable, pointer_type, state.lds_variable, StorageClassFunction});
+		} else {
+			const auto array_type = state.builder.Type(
+			    OpTypeArray, {TypeU32(state), ConstantU32(state, std::max(dwords, 1u))});
+			const auto zero = state.builder.Constant(OpConstantNull, array_type);
+			state.builder.AddFunction(
+			    {OpVariable, pointer_type, state.lds_variable, StorageClassFunction, zero});
+		}
 	}
 	if (state.requirements.function_scratch) {
 		state.builder.AddFunction(

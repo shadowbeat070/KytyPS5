@@ -449,6 +449,9 @@ struct SpirvRequirements {
 	bool image_gather_extended        = false;
 	bool function_lds                 = false;
 	bool function_scratch             = false;
+	// Upper bound, in dwords, on the LDS footprint a non-compute stage actually touches.
+	// Zero means the bound could not be proven and the conservative maximum must be used.
+	uint32_t function_lds_dwords      = 0;
 	bool pixel_valid_mask             = false;
 };
 

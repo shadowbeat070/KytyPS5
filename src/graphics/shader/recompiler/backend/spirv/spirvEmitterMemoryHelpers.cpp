@@ -70,7 +70,17 @@ uint32_t LdsDwordCount(const EmitterState& state) {
 	if (state.stage == ShaderType::Mesh) {
 		return state.input_info.vertex->mesh_lds_size_dwords;
 	}
+	// A stage without hardware LDS emulates it in per-invocation storage, so allocate the proven
+	// footprint instead of the whole 32 KiB hardware window whenever the analysis bounded it.
+	if (LdsHasProvenSize(state)) {
+		return state.requirements.function_lds_dwords;
+	}
 	return 8192u;
+}
+
+bool LdsHasProvenSize(const EmitterState& state) {
+	return state.stage != ShaderType::Compute && state.stage != ShaderType::Mesh &&
+	       state.requirements.function_lds_dwords != 0u;
 }
 
 static void EnsureLdsStorage(EmitterState& state) {

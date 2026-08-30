@@ -6,6 +6,7 @@
 
 #include <algorithm>
 #include <array>
+#include <optional>
 
 namespace Libs::Graphics::ShaderRecompiler::Spirv {
 
@@ -187,6 +188,81 @@ bool ValidateNativeProgram(const IR::Program& program, std::string* error) {
 	return true;
 }
 
+// Bounds a shared-memory byte address so a stage emulating LDS in per-invocation storage allocates
+// what the program can reach, not the conservative maximum. Empty when not provably bounded.
+std::optional<uint32_t> SharedAddressUpperBound(IR::Value value, uint32_t wave_size,
+                                                uint32_t depth) {
+	constexpr uint32_t MaxDepth = 32;
+	if (depth >= MaxDepth) {
+		return std::nullopt;
+	}
+	value = value.Resolve();
+	if (value.IsImmediate()) {
+		return value.GetType() == IR::Type::U32 ? std::optional<uint32_t>(value.U32())
+		                                        : std::nullopt;
+	}
+	const auto* inst = value.TryInstruction();
+	if (inst == nullptr) {
+		return std::nullopt;
+	}
+	const auto Operand = [&](size_t index) {
+		return SharedAddressUpperBound(inst->Arg(index), wave_size, depth + 1);
+	};
+	const auto Immediate = [&](size_t index) -> std::optional<uint32_t> {
+		const auto arg = inst->Arg(index).Resolve();
+		return arg.IsImmediate() && arg.GetType() == IR::Type::U32
+		           ? std::optional<uint32_t>(arg.U32())
+		           : std::nullopt;
+	};
+	switch (inst->GetOpcode()) {
+		case IR::ValueOpcode::LaneId: return wave_size == 0 ? 0u : wave_size - 1u;
+		case IR::ValueOpcode::IAdd32: {
+			const auto lhs = Operand(0);
+			const auto rhs = Operand(1);
+			if (!lhs.has_value() || !rhs.has_value()) {
+				return std::nullopt;
+			}
+			const auto sum = static_cast<uint64_t>(*lhs) + *rhs;
+			return sum > UINT32_MAX ? std::nullopt : std::optional<uint32_t>(sum);
+		}
+		case IR::ValueOpcode::BitwiseAnd32: {
+			// A constant mask bounds the result no matter what the other operand holds.
+			const auto lhs_mask = Immediate(0);
+			const auto rhs_mask = Immediate(1);
+			auto       bound    = lhs_mask.has_value() ? lhs_mask : rhs_mask;
+			if (rhs_mask.has_value() && (!bound.has_value() || *rhs_mask < *bound)) {
+				bound = rhs_mask;
+			}
+			const auto lhs = Operand(0);
+			const auto rhs = Operand(1);
+			for (const auto& candidate: {lhs, rhs}) {
+				if (candidate.has_value() && (!bound.has_value() || *candidate < *bound)) {
+					bound = candidate;
+				}
+			}
+			return bound;
+		}
+		case IR::ValueOpcode::ShiftLeftLogical32: {
+			const auto lhs   = Operand(0);
+			const auto shift = Immediate(1);
+			if (!lhs.has_value() || !shift.has_value() || *shift >= 32u) {
+				return std::nullopt;
+			}
+			const auto shifted = static_cast<uint64_t>(*lhs) << *shift;
+			return shifted > UINT32_MAX ? std::nullopt : std::optional<uint32_t>(shifted);
+		}
+		case IR::ValueOpcode::ShiftRightLogical32: {
+			const auto lhs   = Operand(0);
+			const auto shift = Immediate(1);
+			if (!lhs.has_value() || !shift.has_value() || *shift >= 32u) {
+				return std::nullopt;
+			}
+			return static_cast<uint32_t>(*lhs >> *shift);
+		}
+		default: return std::nullopt;
+	}
+}
+
 } // namespace
 
 bool AnalyzeProgramRequirements(IR::Program& program, std::string* error) {
@@ -240,7 +316,30 @@ bool AnalyzeProgramRequirements(IR::Program& program, std::string* error) {
 				}
 				if (program.stage != ShaderType::Compute && program.stage != ShaderType::Mesh &&
 				    kind == IR::ResourceKind::Lds) {
-					requirements.function_lds = true;
+					if (!requirements.function_lds) {
+						requirements.function_lds        = true;
+						requirements.function_lds_dwords = 1;
+					}
+					const auto&             mem = program.memory_info[index];
+					std::optional<uint32_t> bound;
+					if (shared_access != IR::SharedAccess::Append &&
+					    shared_access != IR::SharedAccess::Consume) {
+						// Outside compute, LaneId lowers to the host subgroup invocation id,
+						// which Vulkan allows to exceed the guest wave size (up to 128).
+						bound = SharedAddressUpperBound(
+						    inst.Arg(0), std::max<uint32_t>(program.wave_size, 128u), 0);
+					}
+					if (!bound.has_value() || requirements.function_lds_dwords == 0) {
+						requirements.function_lds_dwords = 0;
+					} else {
+						const auto last = (static_cast<uint64_t>(*bound) + mem.offset) / 4u +
+						                  std::max<uint32_t>(mem.data_dwords, 1u);
+						requirements.function_lds_dwords =
+						    last > UINT32_MAX
+						        ? 0u
+						        : std::max<uint32_t>(requirements.function_lds_dwords,
+						                             static_cast<uint32_t>(last));
+					}
 				}
 				if (shared_access == IR::SharedAccess::Append ||
 				    shared_access == IR::SharedAccess::Consume) {

@@ -161,6 +161,7 @@ enum : uint32_t {
 	OpConstantFalse                = 42,
 	OpConstant                     = 43,
 	OpConstantComposite            = 44,
+	OpConstantNull                 = 46,
 	OpUndef                        = 1,
 	OpFunction                     = 54,
 	OpFunctionParameter            = 55,
@@ -784,6 +785,7 @@ Prospero::BufferFormat StorageBufferFormat(const EmitterState& state, const IR::
 void EmitMemoryOffsets(EmitterState& state);
 
 uint32_t LdsDwordCount(const EmitterState& state);
+bool     LdsHasProvenSize(const EmitterState& state);
 
 struct MemoryResourceAccess {
 	IR::ResourceKind kind             = IR::ResourceKind::None;
