@@ -63,7 +63,14 @@ namespace {
 	    HasFormatFeature(properties, vk::FormatFeatureFlagBits::eStorageImage)) {
 		usage |= vk::ImageUsageFlagBits::eStorage;
 	} else if (info.samples == 1) {
-		const auto compatible = SrgbStorageViewFormat(info.pixel_format);
+		// EXTENDED_USAGE (set above) allows usage the image format lacks when a view supplies it;
+		// without it a compute-written BC surface gets no storage usage and every write is
+		// discarded. The block view needs eBlockTexelViewCompatible, granted on this predicate.
+		auto compatible = SrgbStorageViewFormat(info.pixel_format);
+		if (compatible == vk::Format::eUndefined &&
+		    Prospero::BlockCompressedBytesPerBlock(info.guest_format) != 0) {
+			compatible = BlockStorageViewFormat(info.pixel_format);
+		}
 		if (compatible != vk::Format::eUndefined &&
 		    HasFormatFeature(graphics.GetFormatProperties(compatible),
 		                     vk::FormatFeatureFlagBits::eStorageImage)) {

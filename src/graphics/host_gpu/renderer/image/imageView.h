@@ -63,6 +63,31 @@ namespace ImageViewOps {
 	}
 }
 
+// The uncompressed format a compute shader writes BC blocks through (one uint texel per 4x4 block,
+// via VK_IMAGE_CREATE_BLOCK_TEXEL_VIEW_COMPATIBLE_BIT). A compressed format never reports the
+// storage-image feature itself, so only this view format can justify storage usage.
+[[nodiscard]] inline vk::Format BlockStorageViewFormat(vk::Format image_format) noexcept {
+	switch (image_format) {
+		case vk::Format::eBc1RgbUnormBlock:
+		case vk::Format::eBc1RgbSrgbBlock:
+		case vk::Format::eBc1RgbaUnormBlock:
+		case vk::Format::eBc1RgbaSrgbBlock:
+		case vk::Format::eBc4UnormBlock:
+		case vk::Format::eBc4SnormBlock: return vk::Format::eR32G32Uint;
+		case vk::Format::eBc2UnormBlock:
+		case vk::Format::eBc2SrgbBlock:
+		case vk::Format::eBc3UnormBlock:
+		case vk::Format::eBc3SrgbBlock:
+		case vk::Format::eBc5UnormBlock:
+		case vk::Format::eBc5SnormBlock:
+		case vk::Format::eBc6HUfloatBlock:
+		case vk::Format::eBc6HSfloatBlock:
+		case vk::Format::eBc7UnormBlock:
+		case vk::Format::eBc7SrgbBlock: return vk::Format::eR32G32B32A32Uint;
+		default: return vk::Format::eUndefined;
+	}
+}
+
 [[nodiscard]] inline bool IsSupportedSampledColorView(vk::Format image_format,
                                                       vk::Format view_format,
                                                       uint32_t   swizzle) noexcept {

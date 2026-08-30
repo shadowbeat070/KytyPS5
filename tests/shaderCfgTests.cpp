@@ -1145,6 +1145,40 @@ void TestNormalizedImageContracts() {
             ImageViewOps::FormatsCompatible(vk::Format::eBc3UnormBlock,
                                             vk::Format::eR32G32B32A32Uint),
         "Vulkan image-view compatibility classes diverged from production");
+
+  // GPU block compression writes BC blocks through an uncompressed uint storage view of the very
+  // same image. That view is the ONLY reason such an image may be given storage usage, so the
+  // format it names has to exist and has to be view-compatible with the compressed format for
+  // every BC kind -- otherwise the image is created without storage usage and the dispatch's
+  // writes are discarded in silence, which is what left a virtual-texture page pool empty.
+  const vk::Format block_formats[] = {
+      vk::Format::eBc1RgbUnormBlock,  vk::Format::eBc1RgbSrgbBlock,
+      vk::Format::eBc1RgbaUnormBlock, vk::Format::eBc1RgbaSrgbBlock,
+      vk::Format::eBc2UnormBlock,     vk::Format::eBc2SrgbBlock,
+      vk::Format::eBc3UnormBlock,     vk::Format::eBc3SrgbBlock,
+      vk::Format::eBc4UnormBlock,     vk::Format::eBc4SnormBlock,
+      vk::Format::eBc5UnormBlock,     vk::Format::eBc5SnormBlock,
+      vk::Format::eBc6HUfloatBlock,   vk::Format::eBc6HSfloatBlock,
+      vk::Format::eBc7UnormBlock,     vk::Format::eBc7SrgbBlock};
+  for (const auto format : block_formats) {
+    const auto view = BlockStorageViewFormat(format);
+    Check(view != vk::Format::eUndefined,
+          "a block-compressed format has no uncompressed storage view format");
+    Check(ImageViewOps::FormatsCompatible(format, view),
+          "the block storage view format is not view-compatible with its image format");
+    Check(SrgbStorageViewFormat(format) == vk::Format::eUndefined,
+          "the sRGB storage view path claimed a block-compressed format");
+  }
+  Check(BlockStorageViewFormat(vk::Format::eBc1RgbUnormBlock) ==
+                vk::Format::eR32G32Uint &&
+            BlockStorageViewFormat(vk::Format::eBc3UnormBlock) ==
+                vk::Format::eR32G32B32A32Uint,
+        "block storage view formats are not the 64/128-bit block classes");
+  Check(BlockStorageViewFormat(vk::Format::eR8G8B8A8Unorm) ==
+                vk::Format::eUndefined &&
+            BlockStorageViewFormat(vk::Format::eD32Sfloat) ==
+                vk::Format::eUndefined,
+        "an uncompressed format was given a block storage view format");
 }
 
 void TestSpirvRequirementsAnalysis() {
