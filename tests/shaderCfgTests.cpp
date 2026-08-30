@@ -23,6 +23,7 @@
 #include "graphics/shader/recompiler/ir/passes/ShaderInfoCollection.h"
 #include "graphics/shader/recompiler/ir/passes/SharedMemoryBarrier.h"
 #include "graphics/shader/recompiler/ir/passes/SrtWalker.h"
+#include "graphics/shader/shaderMergedGeometry.h"
 #include "graphics/shader/recompiler/ir/passes/SsaRewrite.h"
 #include "graphics/shader/shader.h"
 #include "graphics/shader/shaderCompiler.h"
@@ -12383,6 +12384,111 @@ void TestNewShaderRecompilerSpirvSizeBaselines() {
   CheckSpirvPhiParents(dispatcher_result.spirv);
 }
 
+// Silent Hill's five shadow cubes are drawn by a vertex-only NGG program: VGT_SHADER_STAGES_EN
+// 0x00002000, PRIMGEN_EN with NGG_PASSTHROUGH clear, one program in the ES slot and none in the
+// GS slot. Such a program culls its own primitives: it writes each surviving vertex to LDS at a
+// compacted index and reads it back at a raw lane index, and it reads lane 63. That only works
+// when LDS is shared across the wave and the wave is 64 logical lanes wide. Translated as an
+// ordinary vertex stage, LDS becomes per-invocation Function storage and every cross-lane read
+// returns zero - which is why the cubes read back uniformly far and every shadow test passed.
+// This pins the two stages apart on one program.
+void TestVertexOnlyNggCompilesAsMeshWave64() {
+  // The shape of the real program, in miniature and in the same order: lane id, the s3 vertex
+  // -count guard, a compacted LDS write, a raw-index LDS read, a lane-63 read, GS_ALLOC_REQ,
+  // then the primitive and position exports.
+  const uint32_t shader[] = {
+      EncodeVop2(0x23, 61, 193, 0),      // v_mbcnt_lo_u32_b32 v61, -1, v0
+      EncodeVop2(0x24, 61, 193, 61),     // v_mbcnt_hi_u32_b32 v61, -1, v61
+      EncodeVopc(0xd4, 3, 61),           // v_cmpx_gt_u32 exec, s3, v61
+      EncodeVop1(0x01, 10, 5 + 256),     // v_mov_b32 v10, v5
+      EncodeDs0(0x0d),
+      EncodeDs1(0, 10, 61),              // ds_write_b32 v61, v10
+      EncodeDs0(0x36),
+      EncodeDs1(11, 0, 61),              // ds_read_b32 v11, v61
+      EncodeVop3Word0(0x360, 2),
+      EncodeVop3Word1(11 + 256, 191, 0), // v_readlane_b32 s2, v11, 63
+      EncodeVop1(0x01, 13, 2),           // v_mov_b32 v13, s2
+      EncodeSopp(0x10, 9),               // s_sendmsg GS_ALLOC_REQ
+      EncodeExp0(0x14, 0x1, false),
+      EncodeExp1(13, 0, 0, 0),           // PRIM
+      EncodeExp0(0x0c, 0xf),
+      EncodeExp1(10, 10, 10, 10),        // POS0
+      EncodeSopp(0x01),
+  };
+
+  // The values of a real shadow-cube draw: GE_CNTL 64 vertices and 64 primitives per group with
+  // GE_MAX_OUTPUT_PER_SUBGROUP 64, which the renderer's split turns into 21 triangles and their
+  // 63 vertices - the most a 64-lane wave can hold one vertex to a lane.
+  // SPI_SHADER_PGM_RSRC2_GS.LDS_SIZE is 18 granules of 128 dwords.
+  ShaderVertexInputInfo mesh_info{};
+  mesh_info.wave_size = 64;
+  mesh_info.mesh_vertices_per_workgroup = 63;
+  mesh_info.mesh_primitives_per_workgroup = 21;
+  mesh_info.mesh_last_group_index = 3;
+  mesh_info.mesh_last_vertices = 63;
+  mesh_info.mesh_last_primitives = 21;
+  mesh_info.mesh_output_vertices = 63;
+  mesh_info.mesh_output_primitives = 21;
+  mesh_info.mesh_topology =
+      static_cast<uint32_t>(Libs::Graphics::MeshInputTopology::TriangleList);
+  mesh_info.mesh_indexed = false;
+  mesh_info.mesh_merged = false;
+  mesh_info.mesh_lds_size_dwords = 18u * Libs::Graphics::MeshLdsGranuleDwords;
+
+  ShaderRecompiler::CompileOptions mesh_options;
+  mesh_options.stage = ShaderType::Mesh;
+  mesh_options.wave_size = 64;
+  mesh_options.user_data_base = 0;
+  mesh_options.dump_ir = true;
+  mesh_options.input_info.vertex = &mesh_info;
+
+  ShaderRecompiler::CompileResult mesh;
+  std::string error;
+  Check(ShaderRecompiler::TryRecompile(shader, mesh_options, mesh, &error),
+        error.c_str());
+  CheckSpirvBinaryValidates(mesh.spirv);
+  const auto mesh_source = DisassembleSpirvBinary(mesh.spirv);
+
+  Check(Common::ContainsStr(mesh_source,
+                            "%lds_dwords = OpVariable %_ptr_Workgroup"),
+        "a mesh-stage NGG program did not put its LDS in Workgroup storage");
+  Check(Common::ContainsStr(mesh_source, "_arr_uint_uint_2304"),
+        "mesh LDS was not sized from SPI_SHADER_PGM_RSRC2_GS.LDS_SIZE");
+  Check(Common::ContainsStr(mesh_source, "OpSetMeshOutputsEXT"),
+        "GS_ALLOC_REQ did not become OpSetMeshOutputsEXT");
+  Check(Common::ContainsStr(mesh_source, "gl_PrimitiveTriangleIndicesEXT"),
+        "the PRIM export did not become mesh primitive connectivity");
+  // v_readlane 63 cannot resolve inside one 32-lane host subgroup, so a logical wave64 has to
+  // route it through workgroup storage instead. A subgroup shuffle here would silently read the
+  // wrong lane - the defect class this whole path exists to avoid.
+  Check(Common::ContainsStr(mesh_source, "wave_exchange"),
+        "a wave64 lane read did not use the logical-wave64 exchange");
+  Check(!Common::ContainsStr(mesh_source, "OpGroupNonUniformShuffle"),
+        "a wave64 lane read resolved against a 32-lane host subgroup");
+
+  // The same program on the ordinary vertex path, which is where these draws used to go.
+  ShaderVertexInputInfo vertex_info{};
+  vertex_info.wave_size = 64;
+
+  ShaderRecompiler::CompileOptions vertex_options;
+  vertex_options.stage = ShaderType::Vertex;
+  vertex_options.wave_size = 64;
+  vertex_options.user_data_base = 8;
+  vertex_options.dump_ir = true;
+  vertex_options.input_info.vertex = &vertex_info;
+
+  ShaderRecompiler::CompileResult vertex;
+  Check(ShaderRecompiler::TryRecompile(shader, vertex_options, vertex, &error),
+        error.c_str());
+  const auto vertex_source = DisassembleSpirvBinary(vertex.spirv);
+  Check(Common::ContainsStr(vertex_source,
+                            "%lds_dwords = OpVariable %_ptr_Function"),
+        "the vertex stage no longer emulates LDS in per-invocation storage; "
+        "if that changed, this test's premise needs rechecking");
+  Check(!Common::ContainsStr(vertex_source, "OpSetMeshOutputsEXT"),
+        "the vertex stage emitted mesh outputs");
+}
+
 } // namespace
 } // namespace Libs::Graphics
 
@@ -12497,6 +12603,7 @@ int main() {
   TestPixelProgramCacheBindingIdentity();
   TestGraphicsPushConstantPlacement();
   TestNewShaderRecompilerUnsupportedMemoryDecode();
+  TestVertexOnlyNggCompilesAsMeshWave64();
 
   return 0;
 }

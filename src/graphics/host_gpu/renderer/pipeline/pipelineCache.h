@@ -137,11 +137,11 @@ public:
 	ShaderProgram GetComputeProgram(const HW::ComputeShaderInfo& regs,
 	                                const HW::ShaderRegisters& sh,
 	                                ShaderComputeInputInfo& input_info);
-	// Returns an empty program when the merged pair cannot be translated; the caller then
-	// falls back to the ordinary vertex path.
+	// Returns an empty program when the NGG program cannot be translated; the caller then falls
+	// back to the ordinary vertex path. `merged` selects the ES+GS pair over a vertex-only program.
 	ShaderProgram GetMeshProgram(const HW::VertexShaderInfo& regs, const HW::ShaderRegisters& sh,
 	                             const MeshDispatch& dispatch, MeshInputTopology topology,
-	                             bool indexed, ShaderVertexInputInfo& input_info,
+	                             bool indexed, bool merged, ShaderVertexInputInfo& input_info,
 	                             std::string* error);
 
 	GraphicsPipeline& CreateGraphicsPipeline(

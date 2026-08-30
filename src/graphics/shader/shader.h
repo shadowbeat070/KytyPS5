@@ -102,6 +102,9 @@ struct ShaderVertexInputInfo {
 	uint32_t                mesh_output_primitives        = 0;
 	uint32_t                mesh_topology                 = 0;
 	bool                    mesh_indexed                  = false;
+	// True for a merged ES+GS pair (two programs concatenated), false for a single vertex-only
+	// NGG program. Part of the static key so the two shapes cannot share a cached module.
+	bool                    mesh_merged                   = true;
 	uint32_t                mesh_lds_size_dwords          = 0;
 };
 

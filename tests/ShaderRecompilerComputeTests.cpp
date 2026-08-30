@@ -43,6 +43,7 @@
 #include "graphics/shader/rectListShader.h"
 #include "graphics/shader/shader.h"
 #include "graphics/shader/shaderCompiler.h"
+#include "graphics/shader/shaderMergedGeometry.h"
 #include "kernel/eventQueue.h"
 #include "kernel/memory.h"
 #include "libs/agc.h"
@@ -23551,6 +23552,64 @@ void CheckEmbeddedFetchLaneSpill() {
   std::printf("[host]    %-32s ok\n", "EmbeddedFetchLaneSpill");
 }
 
+// The NGG merged geometry pair is recompiled as a mesh shader. Nothing else in the suite drives
+// `ShaderType::Mesh` through `TryRecompile`, so a stage rejected at the recompiler's front door
+// used to leave every mesh test green while every mesh draw in every game was silently dropped.
+// This walks the same entry point `CompileMeshProgram` uses, far enough to prove the stage is
+// accepted and produces a mesh program.
+void CheckMeshStageRecompile() {
+  std::vector<u32> code;
+  AppendEnd(&code);
+
+  std::array<u32, 16> user_data{};
+  ShaderVertexInputInfo vertex;
+  vertex.wave_size = 64;
+  vertex.mesh_vertices_per_workgroup = 4;
+  vertex.mesh_primitives_per_workgroup = 2;
+  vertex.mesh_last_group_index = 0;
+  vertex.mesh_last_vertices = 4;
+  vertex.mesh_last_primitives = 2;
+  vertex.mesh_output_vertices = 4;
+  vertex.mesh_output_primitives = 2;
+  vertex.mesh_topology =
+      static_cast<u32>(MeshInputTopology::TriangleList);
+  vertex.mesh_lds_size_dwords = 64;
+
+  ShaderRecompiler::CompileOptions options;
+  options.stage = ShaderType::Mesh;
+  options.wave_size = vertex.wave_size;
+  options.user_data_base = 0;
+  options.user_data_count = static_cast<u32>(user_data.size());
+  options.user_data = user_data.data();
+  options.input_info.vertex = &vertex;
+
+  ShaderRecompiler::CompileResult result;
+  std::string error;
+  Require("MeshStageRecompile", "compile",
+          ShaderRecompiler::TryRecompile(code, options, result, &error), error);
+  Require("MeshStageRecompile", "stage",
+          result.program.stage == ShaderType::Mesh,
+          "recompiling a mesh program did not produce a mesh stage");
+  Require("MeshStageRecompile", "spirv", !result.spirv.empty(),
+          "recompiling a mesh program produced no SPIR-V");
+
+  // The dispatch split is a real precondition and must still be reported as such, rather than
+  // the stage itself being rejected.
+  ShaderVertexInputInfo unsplit = vertex;
+  unsplit.mesh_vertices_per_workgroup = 0;
+  options.input_info.vertex = &unsplit;
+  ShaderRecompiler::CompileResult unsplit_result;
+  std::string unsplit_error;
+  Require("MeshStageRecompile", "dispatch split required",
+          !ShaderRecompiler::TryRecompile(code, options, unsplit_result,
+                                          &unsplit_error) &&
+              unsplit_error.find("dispatch split") != std::string::npos,
+          "a mesh program without a dispatch split was accepted, or was "
+          "rejected for the wrong reason: " +
+              unsplit_error);
+  std::printf("[host]    %-32s ok\n", "MeshStageRecompile");
+}
+
 void CheckReferenceClockScale() {
   uint64_t value = 0;
   Require("ReferenceClockScale", "zero",
@@ -24625,6 +24684,7 @@ int main(int argc, char **argv) {
   CheckPm4CeCompletion(vulkan.RuntimeRenderer());
   CheckEmbeddedFetchVertexOffset();
   CheckEmbeddedFetchLaneSpill();
+  CheckMeshStageRecompile();
   CheckRectListShaders();
   CheckIndirectImageKeySwitch();
   CheckPs5GameExampleImageClearRuntimeShape();

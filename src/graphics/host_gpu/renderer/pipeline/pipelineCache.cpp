@@ -186,14 +186,14 @@ ShaderProgram PipelineCache::GetVertexProgram(const HW::VertexShaderInfo& regs,
 ShaderProgram PipelineCache::GetMeshProgram(const HW::VertexShaderInfo& regs,
                                             const HW::ShaderRegisters& sh,
                                             const MeshDispatch&        dispatch,
-                                            MeshInputTopology topology, bool indexed,
+                                            MeshInputTopology topology, bool indexed, bool merged,
                                             ShaderVertexInputInfo& input_info,
                                             std::string*           error) {
 	// `user_data` and `code` back the spans in `params`, so both outlive the lookup below.
 	std::vector<uint32_t> user_data;
 	ShaderParams          params;
-	if (!PrepareMeshProgram(regs, sh, dispatch, topology, indexed, input_info, user_data, params,
-	                        error)) {
+	if (!PrepareMeshProgram(regs, sh, dispatch, topology, indexed, merged, input_info, user_data,
+	                        params, error)) {
 		return {};
 	}
 	std::vector<uint32_t> code;
@@ -201,7 +201,7 @@ ShaderProgram PipelineCache::GetMeshProgram(const HW::VertexShaderInfo& regs,
 	return m_program_cache->GetMesh(
 	    params, input_info,
 	    [&](ShaderParams& assembled) {
-		    return AssembleMeshProgram(regs, code, assembled, error);
+		    return AssembleMeshProgram(regs, merged, code, assembled, error);
 	    },
 	    error);
 }

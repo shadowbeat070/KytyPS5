@@ -691,6 +691,12 @@ struct ShaderStagesEn {
 		return primgen_en && !ngg_passthrough && stage_enables == STAGE_ENABLES_ES_GS;
 	}
 
+	// Passthrough clear means the program culls and compacts through LDS itself, which needs
+	// workgroup LDS and 64 logical lanes: only the mesh path can run it.
+	[[nodiscard]] bool IsNggVertexCull() const {
+		return primgen_en && !ngg_passthrough && stage_enables == STAGE_ENABLES_NONE;
+	}
+
 	[[nodiscard]] uint32_t VertexWaveSize() const { return gs_w32_en ? 32u : 64u; }
 };
 

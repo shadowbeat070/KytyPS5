@@ -957,6 +957,9 @@ bool ValidateTranslateOptions(const TranslateOptions& options, std::string* erro
 		return Fail(error, "shader translation requires wave32 or wave64");
 	}
 	switch (options.stage) {
+		// A merged NGG geometry wave is translated as a mesh shader and needs the same vertex
+		// input metadata a vertex stage does.
+		case ShaderType::Mesh:
 		case ShaderType::Vertex:
 			return options.vertex != nullptr ||
 			       Fail(error, "vertex shader translation has no vertex input metadata");
@@ -1230,6 +1233,19 @@ bool TranslateProgram(const Decoder::Program& decoded, const CFG::Graph& cfg,
 			                      builtin(IR::StageInputKind::VertexIndex));
 			entry_ir.SetVectorReg(static_cast<IR::VectorReg>(8),
 			                      builtin(IR::StageInputKind::InstanceIndex));
+			// An NGG vertex shader narrows EXEC with `v_cmpx_lt_u32 exec, lane_id, s3`, so a zero
+			// s3 kills the whole program. One invocation runs per vertex, so seed the counts
+			// full; 64 also makes the alternative `s_lshr_b64 exec, -1, 64 - count` form a no-op.
+			constexpr uint32_t WAVE_INFO_REG = 3u;
+			const bool         user_data_owns_wave_info =
+			    WAVE_INFO_REG >= options.user_data_base &&
+			    WAVE_INFO_REG - options.user_data_base < options.user_data_count;
+			if (!user_data_owns_wave_info) {
+				constexpr uint32_t NGG_WAVE_LANES = 64u;
+				entry_ir.SetScalarReg(static_cast<IR::ScalarReg>(WAVE_INFO_REG),
+				                      IR::U32(IR::Value(NGG_WAVE_LANES | (NGG_WAVE_LANES << 8u) |
+				                                        (1u << 28u))));
+			}
 		}
 	}
 	for (const auto& cfg_block: cfg.blocks) {

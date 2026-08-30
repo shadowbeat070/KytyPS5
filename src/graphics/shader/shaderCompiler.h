@@ -52,16 +52,16 @@ vk::ShaderModule CompileProgram(vk::Device device, const ShaderParams& params,
 vk::ShaderModule CompileProgram(vk::Device device, const ShaderParams& params,
                                 ShaderComputeInputInfo& input_info);
 
-// A merged NGG ES+GS pair compiles to a mesh stage. Preparing the params is enough to look the
-// program up; the two halves are only assembled on a cache miss, and `code` must then outlive
-// the `params` that view it. Every step is fallible: an unsupported pair leaves the draw to the
-// ordinary vertex path instead of terminating the emulator.
+// `merged` is an ES+GS pair, concatenated on a cache miss; `!merged` is a single vertex-only
+// program. `code` must outlive the `params` that view it. Every step is fallible: an unsupported
+// program leaves the draw to the ordinary vertex path instead of terminating the emulator.
 bool PrepareMeshProgram(const HW::VertexShaderInfo& regs, const HW::ShaderRegisters& sh,
                         const MeshDispatch& dispatch, MeshInputTopology topology, bool indexed,
-                        ShaderVertexInputInfo& input_info, std::vector<uint32_t>& user_data,
-                        ShaderParams& params, std::string* error);
-bool AssembleMeshProgram(const HW::VertexShaderInfo& regs, std::vector<uint32_t>& code,
-                         ShaderParams& params, std::string* error);
+                        bool merged, ShaderVertexInputInfo& input_info,
+                        std::vector<uint32_t>& user_data, ShaderParams& params,
+                        std::string* error);
+bool AssembleMeshProgram(const HW::VertexShaderInfo& regs, bool merged_pair,
+                         std::vector<uint32_t>& code, ShaderParams& params, std::string* error);
 vk::ShaderModule CompileMeshProgram(vk::Device device, const ShaderParams& params,
                                     ShaderVertexInputInfo& input_info, std::string* error);
 

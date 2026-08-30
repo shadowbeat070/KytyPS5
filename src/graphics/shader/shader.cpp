@@ -954,6 +954,7 @@ void BuildStageStaticKey(const ShaderVertexInputInfo& info, std::vector<uint32_t
 	key.push_back(info.mesh_output_primitives);
 	key.push_back(info.mesh_topology);
 	key.push_back(static_cast<uint32_t>(info.mesh_indexed));
+	key.push_back(static_cast<uint32_t>(info.mesh_merged));
 	key.push_back(info.mesh_lds_size_dwords);
 }
 
@@ -1460,21 +1461,24 @@ static bool ShaderTryGetMappedData(uint64_t addr, ShaderMappedData& data) {
 
 bool PrepareMeshProgram(const HW::VertexShaderInfo& regs, const HW::ShaderRegisters& sh,
                         const MeshDispatch& dispatch, MeshInputTopology topology, bool indexed,
-                        ShaderVertexInputInfo& info, std::vector<uint32_t>& user_data,
+                        bool merged, ShaderVertexInputInfo& info, std::vector<uint32_t>& user_data,
                         ShaderParams& params, std::string* error) {
 	KYTY_PROFILER_FUNCTION();
 
 	user_data.clear();
 	params = {};
 
-	if (regs.es_regs.data_addr == 0 || regs.gs_regs.data_addr == 0) {
+	if (regs.es_regs.data_addr == 0) {
+		return ShaderError::Fail(error, "a mesh draw needs a program address");
+	}
+	if (merged && regs.gs_regs.data_addr == 0) {
 		return ShaderError::Fail(error, "a merged geometry pair needs both an ES and a GS address");
 	}
 
 	ShaderMappedData es_data;
 	ShaderMappedData gs_data;
 	if (!ShaderTryGetMappedData(regs.es_regs.data_addr, es_data) ||
-	    !ShaderTryGetMappedData(regs.gs_regs.data_addr, gs_data)) {
+	    (merged && !ShaderTryGetMappedData(regs.gs_regs.data_addr, gs_data))) {
 		return ShaderError::Fail(error, "the ES or GS program is missing from ShaderMap");
 	}
 
@@ -1491,6 +1495,7 @@ bool PrepareMeshProgram(const HW::VertexShaderInfo& regs, const HW::ShaderRegist
 	info.mesh_output_primitives        = dispatch.output_primitives_per_workgroup;
 	info.mesh_topology                 = static_cast<uint32_t>(topology);
 	info.mesh_indexed                  = indexed;
+	info.mesh_merged                   = merged;
 	info.mesh_lds_size_dwords          = MeshLdsDwords(regs.gs_regs.rsrc2.lds_size);
 
 	// The launch window is synthesised rather than read out of a register file, so the caller
@@ -1505,15 +1510,23 @@ bool PrepareMeshProgram(const HW::VertexShaderInfo& regs, const HW::ShaderRegist
 	return true;
 }
 
-bool AssembleMeshProgram(const HW::VertexShaderInfo& regs, std::vector<uint32_t>& code,
-                         ShaderParams& params, std::string* error) {
+bool AssembleMeshProgram(const HW::VertexShaderInfo& regs, bool merged_pair,
+                         std::vector<uint32_t>& code, ShaderParams& params, std::string* error) {
 	KYTY_PROFILER_FUNCTION();
 
 	ShaderMappedData es_data;
 	ShaderMappedData gs_data;
 	if (!ShaderTryGetMappedData(regs.es_regs.data_addr, es_data) ||
-	    !ShaderTryGetMappedData(regs.gs_regs.data_addr, gs_data)) {
+	    (merged_pair && !ShaderTryGetMappedData(regs.gs_regs.data_addr, gs_data))) {
 		return ShaderError::Fail(error, "the ES or GS program is missing from ShaderMap");
+	}
+
+	if (!merged_pair) {
+		// No second half to concatenate: view guest memory exactly as the vertex stage does.
+		params.code = std::span {reinterpret_cast<const uint32_t*>(regs.es_regs.data_addr),
+		                         es_data.code_size_bytes / sizeof(uint32_t)};
+		code.clear();
+		return true;
 	}
 
 	MergedGeometryProgram merged;

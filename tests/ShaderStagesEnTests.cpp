@@ -68,13 +68,40 @@ void MergedEsGsIsRecognised() {
   Check(!s.IsNggVertexOnly(), "0x00002030 is not a vertex-only draw");
 }
 
-void TheTwoConfigurationsAreDisjoint() {
-  // A word can never satisfy both predicates, whatever the width bits say.
+void VertexCullIsRecognised() {
+  // Silent Hill's shadow-cube draws. PRIMGEN_EN with no stage enables, like an ordinary vertex
+  // draw, but with the passthrough bit CLEAR: the geometry engine does not forward primitives,
+  // so the one program in the ES slot culls and repacks them itself. It needs workgroup LDS and
+  // 64 logical lanes, so it is routed through the mesh path rather than the vertex path.
+  const auto s = DecodeShaderStages(0x00002000u);
+
+  Check(s.primgen_en, "0x00002000 sets PRIMGEN_EN");
+  Check(!s.ngg_passthrough, "0x00002000 does not set the NGG passthrough bit");
+  Check(s.stage_enables == ShaderStagesEn::STAGE_ENABLES_NONE,
+        "0x00002000 enables no stage");
+  Check(s.IsNggVertexCull(), "0x00002000 is a vertex-only NGG cull draw");
+  Check(!s.IsNggVertexOnly(), "0x00002000 is not a passthrough vertex draw");
+  Check(!s.IsNggMergedEsGs(), "0x00002000 is not a merged ES+GS draw");
+  Check(s.VertexWaveSize() == 64u, "0x00002000 is a wave64 draw");
+
+  // The passthrough bit is the only thing separating the two vertex-only shapes, and it changes
+  // which path the draw takes, so it must not be confused with a width bit.
+  const auto wave32 = DecodeShaderStages(0x00402000u);
+  Check(wave32.IsNggVertexCull(), "0x00402000 is still a vertex-only NGG cull draw");
+  Check(wave32.VertexWaveSize() == 32u, "0x00402000 is a wave32 draw");
+}
+
+void TheThreeConfigurationsAreDisjoint() {
+  // A word can never satisfy two predicates at once, whatever the width bits say.
   for (const uint32_t raw : {0x02002000u, 0x02402000u, 0x00002030u, 0x00000000u,
-                             0x02002030u, 0x00002000u}) {
+                             0x02002030u, 0x00002000u, 0x00402000u}) {
     const auto s = DecodeShaderStages(raw);
     Check(!(s.IsNggVertexOnly() && s.IsNggMergedEsGs()),
           "no stage word is both vertex-only and merged ES+GS");
+    Check(!(s.IsNggVertexCull() && s.IsNggVertexOnly()),
+          "no stage word is both a cull draw and a passthrough draw");
+    Check(!(s.IsNggVertexCull() && s.IsNggMergedEsGs()),
+          "no stage word is both a cull draw and a merged ES+GS draw");
   }
 }
 
@@ -90,10 +117,15 @@ void UnrecognisedWordsAreNeitherConfiguration() {
   Check(!contradictory.IsNggMergedEsGs(),
         "passthrough with stage enables is not a merged ES+GS draw");
 
-  // PRIMGEN alone, without passthrough and without stage enables.
+  Check(!zero.IsNggVertexCull(), "a zero stage word is not a vertex-only cull draw");
+  Check(!contradictory.IsNggVertexCull(),
+        "passthrough with stage enables is not a vertex-only cull draw");
+
+  // PRIMGEN alone, without passthrough and without stage enables: neither of the two shapes the
+  // predicates above name, but a supported one of its own -- see VertexCullIsRecognised.
   const auto primgen_only = DecodeShaderStages(0x00002000u);
   Check(!primgen_only.IsNggVertexOnly(),
-        "PRIMGEN without passthrough is not a vertex-only draw");
+        "PRIMGEN without passthrough is not a passthrough vertex draw");
   Check(!primgen_only.IsNggMergedEsGs(),
         "PRIMGEN without stage enables is not a merged ES+GS draw");
 }
@@ -109,7 +141,8 @@ int main() {
   OrdinaryNggVertexDrawIsVertexOnly();
   WaveSizeBitsDoNotChangePipelineShape();
   MergedEsGsIsRecognised();
-  TheTwoConfigurationsAreDisjoint();
+  VertexCullIsRecognised();
+  TheThreeConfigurationsAreDisjoint();
   UnrecognisedWordsAreNeitherConfiguration();
   RawValueIsPreserved();
 

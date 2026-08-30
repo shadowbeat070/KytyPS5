@@ -425,6 +425,8 @@ static bool PixelShaderHasDepthOrCoverageSideEffects(const HW::ShaderRegisters& 
 
 struct MeshDrawPlan {
 	bool         active = false;
+	// The merged ES+GS pair, as opposed to a single vertex-only NGG program.
+	bool         merged = false;
 	MeshDispatch dispatch;
 	uint32_t          instance_count = 1;
 	MeshInputTopology topology       = MeshInputTopology::TriangleList;
@@ -486,10 +488,14 @@ static bool PlanMeshDraw(const CommandBuffer& buffer, const void* index_addr,
                          MeshDrawPlan& plan, std::string* reason) {
 	plan = {};
 
-	const auto& ctx = buffer.GetRegisters();
-	if (!ctx.GetShaderStagesEn().IsNggMergedEsGs()) {
+	const auto& ctx        = buffer.GetRegisters();
+	const auto  stages_en  = ctx.GetShaderStagesEn();
+	const bool  merged     = stages_en.IsNggMergedEsGs();
+	const bool  vertex_ngg = stages_en.IsNggVertexCull();
+	if (!merged && !vertex_ngg) {
 		return false; // Not a geometry draw at all; nothing to report.
 	}
+	plan.merged = merged;
 
 	const auto& graphics = buffer.GetContext().GetGraphics();
 	const auto& sh_regs  = ctx.GetShaderRegisters();
@@ -506,19 +512,29 @@ static bool PlanMeshDraw(const CommandBuffer& buffer, const void* index_addr,
 	if (!graphics.mesh_shader_enabled) {
 		return reject("VK_EXT_mesh_shader is unavailable");
 	}
-	if (vs_regs.es_regs.data_addr == 0 || vs_regs.gs_regs.data_addr == 0) {
+	if (vs_regs.es_regs.data_addr == 0) {
+		return reject("the NGG draw has no program");
+	}
+	if (merged && vs_regs.gs_regs.data_addr == 0) {
 		return reject("the pair is missing one of its two programs");
 	}
-	if (ctx.GetShaderStagesEn().gs_w32_en) {
-		return reject("the merged pair is wave32, and only wave64 is translated");
+	if (!merged && vs_regs.gs_regs.data_addr != 0) {
+		return reject("a vertex-only NGG draw carries a second program");
 	}
-	if (static_cast<Prospero::GsOutputPrimitiveType>(sh_regs.m_vgtGsOutPrimType) !=
-	    Prospero::GsOutputPrimitiveType::kTriangles) {
+	if (stages_en.gs_w32_en) {
+		return reject("the NGG program is wave32, and only wave64 is translated");
+	}
+	if (merged && static_cast<Prospero::GsOutputPrimitiveType>(sh_regs.m_vgtGsOutPrimType) !=
+	                  Prospero::GsOutputPrimitiveType::kTriangles) {
 		return reject(fmt::format("output primitive type {} is not triangles",
 		                          sh_regs.m_vgtGsOutPrimType));
 	}
-	if (sh_regs.m_vgtGsMaxVertOut < 3) {
+	if (merged && sh_regs.m_vgtGsMaxVertOut < 3) {
 		return reject(fmt::format("{} output vertices per primitive cannot form a triangle",
+		                          sh_regs.m_vgtGsMaxVertOut));
+	}
+	if (!merged && sh_regs.m_vgtGsMaxVertOut != 0) {
+		return reject(fmt::format("a vertex-only NGG draw declares {} GS output vertices",
 		                          sh_regs.m_vgtGsMaxVertOut));
 	}
 	const auto prim_type = buffer.GetUserConfig().GetPrimType();
@@ -555,11 +571,16 @@ static bool PlanMeshDraw(const CommandBuffer& buffer, const void* index_addr,
 	}
 	plan.index_count = index_count;
 
+	// A merged pair amplifies, so VGT_GS_MAX_VERT_OUT is its declared output count. A vertex-only
+	// program only culls, one triangle in per triangle out, and leaves that register 0.
+	const uint32_t vertices_per_primitive = 3u;
+	const uint32_t output_vertices_per_primitive =
+	    merged ? sh_regs.m_vgtGsMaxVertOut : vertices_per_primitive;
 	std::string error;
-	if (!ShaderComputeMeshDispatch(MeshPrimitiveCount(plan.topology, index_count), 3u,
-	                               sh_regs.m_vgtGsMaxVertOut, ge_cntl.vertex_group_size,
-	                               ge_cntl.primitive_group_size, sh_regs.m_geMaxOutputPerSubgroup,
-	                               plan.dispatch, &error)) {
+	if (!ShaderComputeMeshDispatch(MeshPrimitiveCount(plan.topology, index_count),
+	                               vertices_per_primitive, output_vertices_per_primitive,
+	                               ge_cntl.vertex_group_size, ge_cntl.primitive_group_size,
+	                               sh_regs.m_geMaxOutputPerSubgroup, plan.dispatch, &error)) {
 		return reject(error);
 	}
 	if (plan.dispatch.workgroup_count == 0) {
@@ -597,7 +618,8 @@ static bool PlanMeshDraw(const CommandBuffer& buffer, const void* index_addr,
 
 static void LogMergedGeometryRejection(const CommandBuffer& buffer, const std::string& reason,
                                        uint32_t index_count) {
-	if (reason.empty() || !buffer.GetRegisters().GetShaderStagesEn().IsNggMergedEsGs()) {
+	const auto stages_en = buffer.GetRegisters().GetShaderStagesEn();
+	if (reason.empty() || (!stages_en.IsNggMergedEsGs() && !stages_en.IsNggVertexCull())) {
 		return;
 	}
 	static std::mutex               seen_mutex;
@@ -611,9 +633,13 @@ static void LogMergedGeometryRejection(const CommandBuffer& buffer, const std::s
 	}
 	const auto& hw     = buffer.GetRegisters();
 	const auto& target = hw.GetRenderTarget(render_target_first_bound_slot(buffer));
-	LOGF("Dropping merged geometry draw (%" PRIu32 " indices): %s\n"
+	// A merged pair really is dropped; a vertex-only NGG draw falls back to the vertex stage.
+	LOGF("%s (%" PRIu32 " indices): %s\n"
 	     "  would target 0x%010" PRIx64 " %" PRIu32 "x%" PRIu32 " depth=%" PRIu32
 	     " dim=%" PRIu32 "\n",
+	     stages_en.IsNggMergedEsGs()
+	         ? "Dropping merged geometry draw"
+	         : "Leaving vertex-only NGG draw on the vertex path",
 	     index_count, reason.c_str(), target.base.addr, target.attrib2.width + 1,
 	     target.attrib2.height + 1, target.attrib3.depth + 1, target.attrib3.dimension);
 }
@@ -639,12 +665,20 @@ static bool ShouldSkipGeShader(const CommandBuffer& buffer, const MeshDrawPlan& 
 		return false;
 	};
 
-	const bool ps5_ngg_vertex_path = stages == 0x02002000 && vertex_info.es_regs.data_addr != 0 &&
+	// PRIMGEN_EN with no stage enables is vertex-only whatever NGG_PASSTHROUGH says: one program
+	// in the ES slot, which the vertex path already compiles. Test the decoded fields, not the raw
+	// register -- the W32 bits are execution width, not pipeline shape.
+	const auto stages_en = ctx.GetShaderStagesEn();
+	const bool ngg_vertex_only =
+	    stages_en.primgen_en &&
+	    stages_en.stage_enables == HW::ShaderStagesEn::STAGE_ENABLES_NONE;
+
+	const bool ps5_ngg_vertex_path = ngg_vertex_only && vertex_info.es_regs.data_addr != 0 &&
 	                                 vertex_info.gs_regs.chksum != 0 &&
 	                                 sh_regs.m_vgtGsMaxVertOut == 0x00000000 &&
 	                                 is_known_gs_out_prim_type(sh_regs.m_vgtGsOutPrimType);
 
-	const bool unsupported_stage_mask = (stages != 0 && stages != 0x02002000);
+	const bool unsupported_stage_mask = (stages != 0 && !ngg_vertex_only);
 	const bool unsupported_gs_stage = (vertex_info.es_regs.data_addr != 0 &&
 	                                   vertex_info.gs_regs.data_addr != 0 && !ps5_ngg_vertex_path);
 	const bool ge_group_size =
@@ -1203,11 +1237,11 @@ static bool RefreshShaders(CommandBuffer& buffer, const DrawCallInfo& draw, bool
 		state.vertex_program =
 		    pipeline_cache.GetMeshProgram(vertex_shader_info, shader_regs, state.mesh.dispatch,
 		                                  state.mesh.topology, state.mesh.indexed,
-		                                  state.vs_input_info, &mesh_error);
+		                                  state.mesh.merged, state.vs_input_info, &mesh_error);
 		if (!state.vertex_program) {
 			static std::once_flag mesh_failure_once;
 			std::call_once(mesh_failure_once, [&mesh_error, &draw] {
-				LOGF("Dropping merged geometry draw (%s): mesh compile failed: %s\n", draw.name,
+				LOGF("Dropping NGG draw (%s): mesh compile failed: %s\n", draw.name,
 				     mesh_error.c_str());
 			});
 			state.mesh.active = false;

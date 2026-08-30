@@ -302,6 +302,61 @@ void AnAmplifyingGsIsSizedByWhatItEmits() {
         "and one triangle per primitive");
 }
 
+// A vertex-only NGG program has no GS to amplify, so VGT_GS_MAX_VERT_OUT is 0 and carries no
+// information. The renderer derives the output count from the topology instead: a triangle in is
+// a triangle out, three vertices out. The register values below are those of a real shadow-cube
+// draw (GE_CNTL 64/64, GE_MAX_OUTPUT_PER_SUBGROUP 64, VGT_PRIMITIVE_TYPE kTriList).
+void AVertexOnlyNggDrawIsSizedByItsTopology() {
+  constexpr uint32_t VertexOnlyGroupSize = 0x40;
+  constexpr uint32_t VertexOnlyMaxOut = 0x40;
+
+  const auto split = [](uint32_t index_count) {
+    Libs::Graphics::MeshDispatch dispatch;
+    std::string error;
+    const uint32_t primitives = Libs::Graphics::MeshPrimitiveCount(
+        Libs::Graphics::MeshInputTopology::TriangleList, index_count);
+    const bool ok = Libs::Graphics::ShaderComputeMeshDispatch(
+        primitives, TriVerts, TriVerts, VertexOnlyGroupSize, VertexOnlyGroupSize,
+        VertexOnlyMaxOut, dispatch, &error);
+    const std::string message = "vertex-only dispatch computed: " + error;
+    Check(ok, message.c_str());
+    return dispatch;
+  };
+
+  // 245580 indices is the largest single shadow-cube draw in the menu frame.
+  for (const uint32_t index_count : {132u, 1728u, 3648u, 7254u, 11577u, 16344u, 245580u}) {
+    const auto dispatch = split(index_count);
+    Check(dispatch.primitives_per_workgroup == 21,
+          "the lane budget allows 21 triangles per workgroup");
+    Check(dispatch.vertices_per_workgroup == 63, "which is 63 input vertices");
+    // One output vertex per input vertex and one output primitive per input primitive: the
+    // program keeps the triangle it was given or culls it, it never amplifies.
+    Check(dispatch.output_vertices_per_workgroup == dispatch.vertices_per_workgroup,
+          "a vertex-only program emits exactly the vertices it reads");
+    Check(dispatch.output_primitives_per_workgroup == dispatch.primitives_per_workgroup,
+          "and one triangle out per triangle in");
+    Check(dispatch.output_vertices_per_workgroup <= Libs::Graphics::MeshWaveLanes,
+          "the emitted vertices fit the lanes that write them");
+
+    const uint32_t primitives = index_count / TriVerts;
+    const uint32_t covered =
+        (dispatch.workgroup_count - 1) * dispatch.primitives_per_workgroup +
+        dispatch.last_primitives;
+    Check(covered == primitives, "the workgroups cover every triangle of the draw exactly once");
+  }
+
+  // GE_MAX_OUTPUT_PER_SUBGROUP is 64 here rather than the 192 the merged pairs use, and it has
+  // to bind: 64/3 is 21, the same answer the lane budget gives, so a regression that dropped the
+  // subgroup bound would go unnoticed on this title. Halve it and the split must follow.
+  Libs::Graphics::MeshDispatch narrow;
+  std::string error;
+  Check(Libs::Graphics::ShaderComputeMeshDispatch(1000, TriVerts, TriVerts, VertexOnlyGroupSize,
+                                                  VertexOnlyGroupSize, 32, narrow, &error),
+        "a narrower subgroup output bound still splits");
+  Check(narrow.primitives_per_workgroup == 10,
+        "a 32-vertex subgroup output bound holds ten triangles");
+}
+
 } // namespace
 
 int main() {
@@ -320,6 +375,7 @@ int main() {
   ABufferStoreReadsItsDataRegister();
   AStripCountsItsPrimitivesDifferently();
   AnAmplifyingGsIsSizedByWhatItEmits();
+  AVertexOnlyNggDrawIsSizedByItsTopology();
 
   std::printf("MergedGeometryTests: ok\n");
   return 0;
