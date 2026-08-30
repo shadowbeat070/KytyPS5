@@ -41,16 +41,6 @@ void EmitLogicalWaveBarrier(EmitterState& state) {
 	                           ConstantU32(state, semantics)});
 }
 
-void RejectUnsupportedLogicalWave64(const EmitterState& state, const char* operation) {
-	if (!state.logical_wave64) {
-		return;
-	}
-	EXIT("logical wave64: %s is not lowered for a 64-lane workgroup (shader hash=0x%016" PRIx64
-	     "). It would resolve against one 32-lane host subgroup and silently return a wrong "
-	     "result.\n",
-	     operation, state.program.shader_hash);
-}
-
 uint32_t EmitCurrentLaneId(EmitterState& state) {
 	return state.logical_wave64 ? EmitLogicalLaneId(state) : EmitSubgroupLocalInvocationId(state);
 }

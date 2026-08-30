@@ -720,7 +720,12 @@ bool EmitValueFlow(ValueEmitContext& ctx, const IR::Inst& inst) {
 			         {ConstantU32(state, ScopeSubgroup), ctx.Arg(inst, 0)});
 			return true;
 		case IR::ValueOpcode::ReadFirstLane: {
-			RejectUnsupportedLogicalWave64(state, "v_readfirstlane");
+			// Fail the compile so the caller abandons the draw instead of the emulator dying.
+			if (state.logical_wave64) {
+				ctx.Fail(inst, "is not lowered for a 64-lane workgroup: it would resolve against "
+				               "one 32-lane host subgroup and return a wrong result");
+				return true;
+			}
 			const auto ballot = state.builder.AllocateId();
 			const auto lane   = state.builder.AllocateId();
 			state.builder.AddFunction({OpGroupNonUniformBallot, TypeU32Vector(state, 4), ballot,

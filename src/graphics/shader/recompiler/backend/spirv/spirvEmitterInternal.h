@@ -763,7 +763,6 @@ inline constexpr uint32_t LogicalWave64Lanes = 64;
 void     PrepareLogicalWave64Storage(EmitterState& state);
 uint32_t EmitLogicalLaneId(EmitterState& state);
 uint32_t EmitCurrentLaneId(EmitterState& state);
-void     RejectUnsupportedLogicalWave64(const EmitterState& state, const char* operation);
 uint32_t EmitLogicalBallot(EmitterState& state, uint32_t condition);
 uint32_t EmitLogicalReadLane(EmitterState& state, uint32_t value, uint32_t lane);
 void     EmitLogicalWaveBarrier(EmitterState& state);
