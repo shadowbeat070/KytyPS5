@@ -112,6 +112,7 @@ bool ValidateValueReferences(const Program& program, const ShaderInfoOptions& op
 						case StageInputKind::VertexIndex:
 						case StageInputKind::InstanceIndex:
 						case StageInputKind::FrontFacing:
+						case StageInputKind::Layer:
 						case StageInputKind::LocalInvocationIndex:
 							if (component != 0u) {
 								return Fail("typed scalar builtin component is out of range");
@@ -184,6 +185,9 @@ void CollectPixelInputs(const Program& program, const ShaderPixelInputInfo* pixe
 	if (pixel->ps_front_face) {
 		AddInput(info, StageInputKind::FrontFacing, 0, 1, "gl_FrontFacing");
 	}
+	if (pixel->ps_ancillary) {
+		AddInput(info, StageInputKind::Layer, 0, 1, "gl_Layer");
+	}
 	std::array<bool, 32> per_vertex {};
 	std::array<bool, 32> interpolated {};
 	for (const auto* block: program.blocks) {
@@ -246,6 +250,7 @@ void CollectBuiltinInputs(const Program& program, ShaderInfo& info) {
 				case StageInputKind::FrontFacing:
 					AddInput(info, kind, 0, 1, "gl_FrontFacing");
 					break;
+				case StageInputKind::Layer: AddInput(info, kind, 0, 1, "gl_Layer"); break;
 				case StageInputKind::BaryCoordSmooth:
 					AddInput(info, kind, 0, 3, "gl_BaryCoordKHR");
 					break;

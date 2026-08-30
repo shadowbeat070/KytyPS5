@@ -516,6 +516,7 @@ uint32_t BuiltInForInput(IR::StageInputKind kind) {
 		case IR::StageInputKind::LocalInvocationId: return BuiltInLocalInvocationId;
 		case IR::StageInputKind::LocalInvocationIndex: return BuiltInLocalInvocationIndex;
 		case IR::StageInputKind::GlobalInvocationId: return BuiltInGlobalInvocationId;
+		case IR::StageInputKind::Layer: return BuiltInLayer;
 		default: return UINT32_MAX;
 	}
 }
@@ -555,6 +556,10 @@ void AddInputAnnotationsAndNames(EmitterState& state) {
 		if (builtin != UINT32_MAX) {
 			state.builder.AddAnnotation(
 			    {OpDecorate, input.variable_id, DecorationBuiltIn, builtin});
+		}
+		// An integer fragment input cannot be interpolated.
+		if (state.stage == ShaderType::Pixel && input.kind == IR::StageInputKind::Layer) {
+			state.builder.AddAnnotation({OpDecorate, input.variable_id, DecorationFlat});
 		}
 	}
 }
@@ -730,6 +735,14 @@ void DefineModule(EmitterState& state) {
 		state.builder.RequireCapability(CapabilityShaderViewportIndexLayerEXT);
 		state.builder.RequireExtension("SPV_EXT_shader_viewport_index_layer");
 	}
+	// ShaderViewportIndexLayerEXT also enables the Layer built-in, but validation rejects it on
+	// Vulkan 1.2+, so use ShaderLayer and raise the module to the version that introduced it.
+	if (std::any_of(state.inputs.begin(), state.inputs.end(), [](const InputBinding& input) {
+		    return input.kind == IR::StageInputKind::Layer;
+	    })) {
+		state.builder.RequireVersion(SpirvVersion15);
+		state.builder.RequireCapability(CapabilityShaderLayer);
+	}
 	if (state.requirements.image_gather_extended) {
 		state.builder.RequireCapability(CapabilityImageGatherExtended);
 	}
@@ -829,6 +842,7 @@ void DefineModule(EmitterState& state) {
 		switch (input.kind) {
 			case IR::StageInputKind::VertexIndex:
 			case IR::StageInputKind::InstanceIndex:
+			case IR::StageInputKind::Layer:
 				ptr_type = TypePointer(state, StorageClassInput, TypeI32(state));
 				break;
 			case IR::StageInputKind::WorkgroupId:

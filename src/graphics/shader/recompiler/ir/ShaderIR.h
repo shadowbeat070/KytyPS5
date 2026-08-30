@@ -189,6 +189,9 @@ enum class StageInputKind {
 	LocalInvocationIndex,
 	GlobalInvocationId,
 	Parameter,
+	// The render-target array index of the slice a fragment is being shaded into. GCN delivers
+	// it to a pixel program inside the ANCILLARY VGPR, not as an interpolated parameter.
+	Layer,
 };
 
 enum class StageOutputKind {

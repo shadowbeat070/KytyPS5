@@ -140,6 +140,8 @@ struct ShaderPixelInputInfo {
 	bool                                           ps_pos_z                     = false;
 	bool                                           ps_pos_w                     = false;
 	bool                                           ps_front_face                = false;
+	// SPI_PS_INPUT_ENA.ANCILLARY: the VGPR it names carries the render-target array index.
+	bool                                           ps_ancillary                 = false;
 	bool                                           ps_no_perspective            = false;
 	bool                                           ps_pixel_kill_enable         = false;
 	bool                                           ps_depth_export_enable       = false;

@@ -23610,6 +23610,79 @@ void CheckMeshStageRecompile() {
   std::printf("[host]    %-32s ok\n", "MeshStageRecompile");
 }
 
+// SPI_PS_INPUT_ENA.ANCILLARY hands a pixel program the render-target array index of the slice
+// it is shading, in bits [26:16] of one VGPR. A pixel program that writes a volume texture one
+// slice per instance recovers its slice from there and from nowhere else, so leaving the VGPR
+// unseeded silently shades every slice as slice zero - which is how a 32-slice colour grading
+// LUT came out as 32 copies of its first slice.
+void CheckPixelAncillaryLayerInput() {
+  std::vector<u32> code;
+  code.push_back(EncodeExp0(0x00, 0xf));
+  code.push_back(EncodeExp1(0, 0, 0, 0));
+  AppendEnd(&code);
+
+  std::array<u32, 16> user_data{};
+  ShaderPixelInputInfo pixel;
+  pixel.ps_system_input_base = 0;
+  pixel.ps_ancillary = true;
+
+  ShaderRecompiler::CompileOptions options;
+  options.stage = ShaderType::Pixel;
+  options.wave_size = 64;
+  options.user_data_base = 0;
+  options.user_data_count = static_cast<u32>(user_data.size());
+  options.user_data = user_data.data();
+  options.input_info.pixel = &pixel;
+
+  ShaderRecompiler::CompileResult result;
+  std::string error;
+  Require("PixelAncillaryLayerInput", "compile",
+          ShaderRecompiler::TryRecompile(code, options, result, &error), error);
+  ValidateSpirv("PixelAncillaryLayerInput", result.spirv);
+
+  spvtools::SpirvTools tools(SPV_ENV_VULKAN_1_2);
+  std::string text;
+  Require("PixelAncillaryLayerInput", "disassembly",
+          tools.Disassemble(result.spirv, &text),
+          "failed to disassemble the emitted pixel shader");
+  Require("PixelAncillaryLayerInput", "layer built-in",
+          text.find("BuiltIn Layer") != std::string::npos,
+          "a pixel shader that reads ANCILLARY did not declare the Layer "
+          "built-in as an input");
+  Require("PixelAncillaryLayerInput", "layer capability",
+          text.find("OpCapability ShaderLayer") != std::string::npos,
+          "the Layer input was declared without the capability that enables "
+          "it");
+  Require("PixelAncillaryLayerInput", "layer is flat",
+          text.find("Flat") != std::string::npos,
+          "an integer fragment input was left interpolated");
+  Require("PixelAncillaryLayerInput", "layer reaches the vgpr",
+          text.find("OpShiftLeftLogical") != std::string::npos,
+          "the layer was never placed in the ANCILLARY bit field the guest "
+          "reads it from");
+
+  // Without the register the built-in must not appear at all: a pixel shader that never asked
+  // for ANCILLARY should not pay for a layered-rendering capability.
+  ShaderPixelInputInfo plain;
+  plain.ps_system_input_base = 0;
+  options.input_info.pixel = &plain;
+  ShaderRecompiler::CompileResult plain_result;
+  std::string plain_error;
+  Require("PixelAncillaryLayerInput", "compile without ancillary",
+          ShaderRecompiler::TryRecompile(code, options, plain_result,
+                                         &plain_error),
+          plain_error);
+  std::string plain_text;
+  Require("PixelAncillaryLayerInput", "disassembly without ancillary",
+          tools.Disassemble(plain_result.spirv, &plain_text),
+          "failed to disassemble the emitted pixel shader");
+  Require("PixelAncillaryLayerInput", "no layer without ancillary",
+          plain_text.find("BuiltIn Layer") == std::string::npos &&
+              plain_text.find("OpCapability ShaderLayer") == std::string::npos,
+          "a pixel shader without ANCILLARY declared the Layer built-in");
+  std::printf("[host]    %-32s ok\n", "PixelAncillaryLayerInput");
+}
+
 void CheckReferenceClockScale() {
   uint64_t value = 0;
   Require("ReferenceClockScale", "zero",
@@ -24685,6 +24758,7 @@ int main(int argc, char **argv) {
   CheckEmbeddedFetchVertexOffset();
   CheckEmbeddedFetchLaneSpill();
   CheckMeshStageRecompile();
+  CheckPixelAncillaryLayerInput();
   CheckRectListShaders();
   CheckIndirectImageKeySwitch();
   CheckPs5GameExampleImageClearRuntimeShape();
