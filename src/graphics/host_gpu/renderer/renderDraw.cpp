@@ -42,7 +42,9 @@
 #include <mutex>
 #include <optional>
 #include <span>
+#include <type_traits>
 #include <unordered_map>
+#include <utility>
 #include <vector>
 
 namespace Libs::Graphics {
@@ -512,9 +514,15 @@ static bool PlanMeshDraw(const CommandBuffer& buffer, const void* index_addr,
 	const auto& ge_cntl  = buffer.GetUserConfig().GetGeControl();
 	const auto& vs_regs  = buffer.GetShaders().GetVs();
 
-	const auto reject = [reason](const std::string& message) {
+	// Takes a literal or a callable, and only invokes the callable when a caller wants the text:
+	// formatting a message that is then discarded ran for every NGG draw.
+	const auto reject = [reason](auto&& describe) {
 		if (reason != nullptr) {
-			*reason = message;
+			if constexpr (std::is_invocable_v<decltype(describe)>) {
+				*reason = describe();
+			} else {
+				*reason = std::forward<decltype(describe)>(describe);
+			}
 		}
 		return false;
 	};
@@ -536,16 +544,22 @@ static bool PlanMeshDraw(const CommandBuffer& buffer, const void* index_addr,
 	}
 	if (merged && static_cast<Prospero::GsOutputPrimitiveType>(sh_regs.m_vgtGsOutPrimType) !=
 	                  Prospero::GsOutputPrimitiveType::kTriangles) {
-		return reject(fmt::format("output primitive type {} is not triangles",
-		                          sh_regs.m_vgtGsOutPrimType));
+		return reject([&] {
+			return fmt::format("output primitive type {} is not triangles",
+			                   sh_regs.m_vgtGsOutPrimType);
+		});
 	}
 	if (merged && sh_regs.m_vgtGsMaxVertOut < 3) {
-		return reject(fmt::format("{} output vertices per primitive cannot form a triangle",
-		                          sh_regs.m_vgtGsMaxVertOut));
+		return reject([&] {
+			return fmt::format("{} output vertices per primitive cannot form a triangle",
+			                   sh_regs.m_vgtGsMaxVertOut);
+		});
 	}
 	if (!merged && sh_regs.m_vgtGsMaxVertOut != 0) {
-		return reject(fmt::format("a vertex-only NGG draw declares {} GS output vertices",
-		                          sh_regs.m_vgtGsMaxVertOut));
+		return reject([&] {
+			return fmt::format("a vertex-only NGG draw declares {} GS output vertices",
+			                   sh_regs.m_vgtGsMaxVertOut);
+		});
 	}
 	const auto prim_type = buffer.GetUserConfig().GetPrimType();
 	switch (prim_type) {
@@ -556,24 +570,32 @@ static bool PlanMeshDraw(const CommandBuffer& buffer, const void* index_addr,
 			plan.topology = MeshInputTopology::TriangleStrip;
 			break;
 		default:
-			return reject(fmt::format("input primitive type {} is not a triangle list or strip",
-			                          static_cast<uint32_t>(prim_type)));
+			return reject([&] {
+				return fmt::format("input primitive type {} is not a triangle list or strip",
+				                   static_cast<uint32_t>(prim_type));
+			});
 	}
 	if (prim_type == Prospero::PrimitiveType::kTriList && index_count % 3u != 0) {
-		return reject(fmt::format("{} indices do not divide into whole triangles", index_count));
+		return reject([&] {
+			return fmt::format("{} indices do not divide into whole triangles", index_count);
+		});
 	}
 	if (vertex_offset != 0 || first_instance != 0) {
-		return reject(fmt::format("vertex offset {} / first instance {} are not folded into the "
-		                          "launch state",
-		                          vertex_offset, first_instance));
+		return reject([&] {
+			return fmt::format("vertex offset {} / first instance {} are not folded into the "
+			                   "launch state",
+			                   vertex_offset, first_instance);
+		});
 	}
 	const bool identity_indices =
-	    index_addr == nullptr || DrawIndicesAreIdentity(index_addr, index_type_and_size,
-	                                                    index_count);
+	    index_addr == nullptr ||
+	    DrawIndicesAreIdentity(index_addr, index_type_and_size, index_count);
 	if (!identity_indices) {
 		if (!IsSupportedMeshIndexType(index_type_and_size)) {
-			return reject(
-			    fmt::format("index type {} is not a known index encoding", index_type_and_size));
+			return reject([&] {
+				return fmt::format("index type {} is not a known index encoding",
+				                   index_type_and_size);
+			});
 		}
 		plan.indexed    = true;
 		plan.index_addr = index_addr;
@@ -587,43 +609,58 @@ static bool PlanMeshDraw(const CommandBuffer& buffer, const void* index_addr,
 	const uint32_t output_vertices_per_primitive =
 	    merged ? sh_regs.m_vgtGsMaxVertOut : vertices_per_primitive;
 	std::string error;
+	std::string* error_sink = (reason != nullptr ? &error : nullptr);
 	if (!ShaderComputeMeshDispatch(MeshPrimitiveCount(plan.topology, index_count),
 	                               vertices_per_primitive, output_vertices_per_primitive,
 	                               ge_cntl.vertex_group_size, ge_cntl.primitive_group_size,
-	                               sh_regs.m_geMaxOutputPerSubgroup, plan.dispatch, &error)) {
+	                               sh_regs.m_geMaxOutputPerSubgroup, plan.dispatch, error_sink)) {
 		return reject(error);
 	}
 	if (plan.dispatch.workgroup_count == 0) {
 		return reject("the draw has no whole primitives");
 	}
 	if (!ShaderValidateMeshLds(MeshLdsDwords(vs_regs.gs_regs.rsrc2.lds_size),
-	                           graphics.max_mesh_shared_memory_size, &error)) {
+	                           graphics.max_mesh_shared_memory_size, error_sink)) {
 		return reject(error);
 	}
 	if (plan.dispatch.output_vertices_per_workgroup > graphics.max_mesh_output_vertices ||
 	    plan.dispatch.output_primitives_per_workgroup > graphics.max_mesh_output_primitives ||
 	    MeshWaveLanes > graphics.max_mesh_work_group_invocations) {
-		return reject(fmt::format("a workgroup emitting {} vertices / {} primitives over {} "
-		                          "invocations exceeds the host mesh limits ({} / {} / {})",
-		                          plan.dispatch.output_vertices_per_workgroup,
-		                          plan.dispatch.output_primitives_per_workgroup, MeshWaveLanes,
-		                          graphics.max_mesh_output_vertices,
-		                          graphics.max_mesh_output_primitives,
-		                          graphics.max_mesh_work_group_invocations));
+		return reject([&] {
+			return fmt::format("a workgroup emitting {} vertices / {} primitives over {} "
+			                   "invocations exceeds the host mesh limits ({} / {} / {})",
+			                   plan.dispatch.output_vertices_per_workgroup,
+			                   plan.dispatch.output_primitives_per_workgroup, MeshWaveLanes,
+			                   graphics.max_mesh_output_vertices,
+			                   graphics.max_mesh_output_primitives,
+			                   graphics.max_mesh_work_group_invocations);
+		});
 	}
 
 	if (plan.dispatch.workgroup_count > graphics.max_mesh_work_group_count[0] ||
 	    instance_count > graphics.max_mesh_work_group_count[1]) {
-		return reject(fmt::format("a {}x{} workgroup grid exceeds the host's {}x{}",
-		                          plan.dispatch.workgroup_count, instance_count,
-		                          graphics.max_mesh_work_group_count[0],
-		                          graphics.max_mesh_work_group_count[1]));
+		return reject([&] {
+			return fmt::format("a {}x{} workgroup grid exceeds the host's {}x{}",
+			                   plan.dispatch.workgroup_count, instance_count,
+			                   graphics.max_mesh_work_group_count[0],
+			                   graphics.max_mesh_work_group_count[1]);
+		});
 	}
 
 	plan.instance_count = instance_count;
 	plan.active         = true;
 
 	return true;
+}
+
+// Each distinct rejection is reported once, up to this many.
+constexpr uint32_t MERGED_GEOMETRY_REJECTION_REPORTS_MAX = 32;
+
+static std::atomic<uint32_t> g_merged_geometry_rejection_reports {0};
+
+static bool WantMergedGeometryRejection() {
+	return g_merged_geometry_rejection_reports.load(std::memory_order_relaxed) <
+	       MERGED_GEOMETRY_REJECTION_REPORTS_MAX;
 }
 
 static void LogMergedGeometryRejection(const CommandBuffer& buffer, const std::string& reason,
@@ -636,10 +673,13 @@ static void LogMergedGeometryRejection(const CommandBuffer& buffer, const std::s
 	static std::vector<std::string> seen;
 	{
 		std::scoped_lock lock(seen_mutex);
-		if (std::find(seen.begin(), seen.end(), reason) != seen.end()) {
+		if (seen.size() >= MERGED_GEOMETRY_REJECTION_REPORTS_MAX ||
+		    std::find(seen.begin(), seen.end(), reason) != seen.end()) {
 			return;
 		}
 		seen.push_back(reason);
+		g_merged_geometry_rejection_reports.store(static_cast<uint32_t>(seen.size()),
+		                                          std::memory_order_relaxed);
 	}
 	const auto& hw     = buffer.GetRegisters();
 	const auto& target = hw.GetRenderTarget(render_target_first_bound_slot(buffer));
@@ -1567,13 +1607,21 @@ void RenderExecutor::DrawIndex(uint64_t submit_id, CommandBuffer& buffer,
 	}
 
 	MeshDrawPlan mesh_plan;
-	std::string  mesh_reject;
 	PlanMeshDraw(buffer, index_addr, index_type_and_size, index_count, instance_count,
 	             first_instance, static_cast<int32_t>(ucfg.GetIndexOffset()) + vertex_offset_add,
-	             mesh_plan, &mesh_reject);
+	             mesh_plan, nullptr);
 
 	if (ShouldSkipGeShader(buffer, mesh_plan)) {
-		LogMergedGeometryRejection(buffer, mesh_reject, index_count);
+		// Purely diagnostic, and planning is side-effect free, so re-plan only to build the text.
+		if (WantMergedGeometryRejection()) {
+			MeshDrawPlan diagnostic_plan;
+			std::string  mesh_reject;
+			PlanMeshDraw(buffer, index_addr, index_type_and_size, index_count, instance_count,
+			             first_instance,
+			             static_cast<int32_t>(ucfg.GetIndexOffset()) + vertex_offset_add,
+			             diagnostic_plan, &mesh_reject);
+			LogMergedGeometryRejection(buffer, mesh_reject, index_count);
+		}
 		return;
 	}
 
@@ -1709,12 +1757,17 @@ void RenderExecutor::DrawAuto(uint64_t submit_id, CommandBuffer& buffer, uint32_
 	}
 
 	MeshDrawPlan mesh_plan;
-	std::string  mesh_reject;
 	PlanMeshDraw(buffer, nullptr, 0, index_count, instance_count, first_instance, 0, mesh_plan,
-	             &mesh_reject);
+	             nullptr);
 
 	if (ShouldSkipGeShader(buffer, mesh_plan)) {
-		LogMergedGeometryRejection(buffer, mesh_reject, index_count);
+		if (WantMergedGeometryRejection()) {
+			MeshDrawPlan diagnostic_plan;
+			std::string  mesh_reject;
+			PlanMeshDraw(buffer, nullptr, 0, index_count, instance_count, first_instance, 0,
+			             diagnostic_plan, &mesh_reject);
+			LogMergedGeometryRejection(buffer, mesh_reject, index_count);
+		}
 		return;
 	}
 
