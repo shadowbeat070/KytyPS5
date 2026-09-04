@@ -22,6 +22,7 @@
 #include <bit>
 #include <cinttypes>
 #include <cmath>
+#include <cstdio>
 #include <cstring>
 #include <limits>
 #include <mutex>
@@ -1047,6 +1048,32 @@ ImageId TextureCache::ResolveDepthOverlap(const ImageInfo& requested, BindingTyp
 	return replacement_id;
 }
 
+namespace {
+
+void LogUnresolvableOverlapOnce(const ImageInfo& requested, const ImageInfo& cached) {
+	static std::once_flag once; // NOLINT(cppcoreguidelines-avoid-non-const-global-variables)
+	std::call_once(once, [&] {
+		const char* text =
+		    "TextureCache: unresolvable equal-address image overlap, starting a fresh image. "
+		    "address=0x%016" PRIx64 " requested=%ux%u cached=%ux%u "
+		    "requested_extent=%ux%ux%u cached_extent=%ux%ux%u "
+		    "requested_size=0x%016" PRIx64 " cached_size=0x%016" PRIx64
+		    " type=%u/%u tile=%u/%u format=%u/%u\n";
+		LOGF_COLOR(Log::Color::BrightYellow, text, requested.data.address,
+		           requested.resources.levels, requested.resources.layers, cached.resources.levels,
+		           cached.resources.layers, requested.extent.width, requested.extent.height,
+		           requested.extent.depth, cached.extent.width, cached.extent.height,
+		           cached.extent.depth, requested.data.size, cached.data.size,
+		           static_cast<uint32_t>(requested.type), static_cast<uint32_t>(cached.type),
+		           static_cast<uint32_t>(requested.tile_mode),
+		           static_cast<uint32_t>(cached.tile_mode),
+		           static_cast<uint32_t>(requested.pixel_format),
+		           static_cast<uint32_t>(cached.pixel_format));
+	});
+}
+
+} // namespace
+
 TextureCache::OverlapResult TextureCache::ResolveOverlap(const ImageInfo& requested,
                                                          BindingType binding, ImageId cached_id,
                                                          ImageId merged_id) {
@@ -1107,15 +1134,19 @@ TextureCache::OverlapResult TextureCache::ResolveOverlap(const ImageInfo& reques
 		if (requested.type == cached.info.type && requested.resources > cached.info.resources) {
 			return {ExpandImage(requested, cached_id)};
 		}
-		EXIT("TextureCache: unresolvable equal-address image overlap, address=0x%016" PRIx64
-		     " requested=%ux%u "
-		     "cached=%ux%u requested_size=0x%016" PRIx64 " cached_size=0x%016" PRIx64
-		     " type=%u/%u tile=%u/%u\n",
-		     requested.data.address, requested.resources.levels, requested.resources.layers,
-		     cached.info.resources.levels, cached.info.resources.layers, requested.data.size,
-		     cached.info.data.size, static_cast<uint32_t>(requested.type),
-		     static_cast<uint32_t>(cached.info.type), static_cast<uint32_t>(requested.tile_mode),
-		     static_cast<uint32_t>(cached.info.tile_mode));
+		// The guest now describes more bytes than the cached image covers, so it grew. Only sound
+		// while the request covers the cached image in every dimension: CopyImage does not clamp.
+		if (requested.type == cached.info.type &&
+		    requested.extent.width >= cached.info.extent.width &&
+		    requested.extent.height >= cached.info.extent.height &&
+		    requested.extent.depth >= cached.info.extent.depth) {
+			return {ExpandImage(requested, cached_id)};
+		}
+		LogUnresolvableOverlapOnce(requested, cached.info);
+		if (safe_to_delete) {
+			FreeImage(cached_id);
+		}
+		return {merged_id};
 	}
 
 	if (requested.data.address > cached.info.data.address) {
