@@ -6,6 +6,7 @@
 #include <algorithm>
 #include <bit>
 #include <cstring>
+#include <memory>
 #include <fmt/format.h>
 #include <unordered_map>
 #include <unordered_set>
@@ -408,11 +409,138 @@ private:
 	std::vector<Patch> m_patches;
 };
 
+// Open-addressed memo whose storage is recycled between walks; a generation stamp retires the
+// previous contents in O(1), so a steady-state walk allocates nothing.
+class InstMemo {
+public:
+	void Begin(size_t expected_entries) {
+		Grow(expected_entries);
+		if (++m_generation == 0) {
+			std::fill(m_stamp.begin(), m_stamp.end(), 0u);
+			m_generation = 1;
+		}
+		m_count = 0;
+		visiting.clear();
+	}
+
+	bool Find(const Inst* key, uint64_t& value) const {
+		for (auto slot = Start(key);; slot = (slot + 1) & m_mask) {
+			if (m_stamp[slot] != m_generation) {
+				return false;
+			}
+			if (m_key[slot] == key) {
+				value = m_value[slot];
+				return true;
+			}
+		}
+	}
+
+	void Insert(const Inst* key, uint64_t value) {
+		if ((m_count + 1) * 4u >= m_capacity * 3u) {
+			Rehash();
+		}
+		for (auto slot = Start(key);; slot = (slot + 1) & m_mask) {
+			if (m_stamp[slot] != m_generation) {
+				m_stamp[slot] = m_generation;
+				m_key[slot]   = key;
+				m_value[slot] = value;
+				m_count++;
+				return;
+			}
+			if (m_key[slot] == key) {
+				m_value[slot] = value;
+				return;
+			}
+		}
+	}
+
+	std::vector<const Inst*> visiting;
+
+private:
+	[[nodiscard]] size_t Start(const Inst* key) const {
+		auto hash = reinterpret_cast<uintptr_t>(key) >> 4u;
+		hash *= 0x9e3779b97f4a7c15ull;
+		return static_cast<size_t>(hash >> 32u) & m_mask;
+	}
+
+	void Grow(size_t expected_entries) {
+		size_t wanted = 64;
+		while (wanted * 3u < (expected_entries + 1u) * 4u) {
+			wanted *= 2u;
+		}
+		if (wanted <= m_capacity) {
+			return;
+		}
+		m_capacity = wanted;
+		m_mask     = wanted - 1u;
+		m_key.assign(wanted, nullptr);
+		m_value.assign(wanted, 0);
+		m_stamp.assign(wanted, 0u);
+		m_generation = 0;
+	}
+
+	void Rehash() {
+		std::vector<std::pair<const Inst*, uint64_t>> live;
+		live.reserve(m_count);
+		for (size_t slot = 0; slot < m_capacity; slot++) {
+			if (m_stamp[slot] == m_generation) {
+				live.emplace_back(m_key[slot], m_value[slot]);
+			}
+		}
+		const auto generation = m_generation;
+		m_capacity            = 0;
+		Grow(live.size() * 2u + 64u);
+		m_generation = generation;
+		m_count      = 0;
+		for (const auto& [key, value]: live) {
+			Insert(key, value);
+		}
+	}
+
+	std::vector<const Inst*> m_key;
+	std::vector<uint64_t>    m_value;
+	std::vector<uint32_t>    m_stamp;
+	uint32_t                 m_generation = 0;
+	size_t                   m_capacity   = 0;
+	size_t                   m_mask       = 0;
+	size_t                   m_count      = 0;
+};
+
+// Walks may nest, so memos come from a per-thread free list and return when the walk unwinds.
+class MemoLease {
+public:
+	explicit MemoLease(size_t expected_entries) {
+		auto& pool = Pool();
+		if (pool.empty()) {
+			m_memo = std::make_unique<InstMemo>();
+		} else {
+			m_memo = std::move(pool.back());
+			pool.pop_back();
+		}
+		m_memo->Begin(expected_entries);
+	}
+	MemoLease(const MemoLease&)            = delete;
+	MemoLease(MemoLease&&)                 = delete;
+	MemoLease& operator=(const MemoLease&) = delete;
+	MemoLease& operator=(MemoLease&&)      = delete;
+	~MemoLease() { Pool().push_back(std::move(m_memo)); }
+
+	InstMemo& operator*() const { return *m_memo; }
+
+private:
+	static std::vector<std::unique_ptr<InstMemo>>& Pool() {
+		static thread_local std::vector<std::unique_ptr<InstMemo>> pool;
+		return pool;
+	}
+
+	std::unique_ptr<InstMemo> m_memo;
+};
+
 class Evaluator {
 public:
-	Evaluator(const Program& program, const SrtRuntime& runtime,
+	Evaluator(const Program& program, const SrtRuntime& runtime, InstMemo& memo,
 	          std::span<const uint8_t> clean_flat_slots = {}, Evaluator* clean_evaluator = nullptr)
-	    : m_program(program), m_runtime(runtime),
+	    : m_program(program), m_runtime(runtime), m_memo(memo),
 	      m_clean_flat_slots(clean_flat_slots), m_clean_evaluator(clean_evaluator) {}
 
 	void SetUsePc(uint32_t pc) { m_use_pc = pc; }
@@ -447,20 +575,20 @@ private:
 		if (inst == nullptr) {
 			return Fail(error, "invalid typed runtime value");
 		}
-		if (const auto found = m_cache.find(inst); found != m_cache.end()) {
-			result = found->second;
+		if (m_memo.Find(inst, result)) {
 			return true;
 		}
-		if (std::ranges::find(m_visiting, inst) != m_visiting.end()) {
+		auto& visiting = m_memo.visiting;
+		if (std::ranges::find(visiting, inst) != visiting.end()) {
 			return Fail(error, "cyclic typed runtime value");
 		}
-		m_visiting.push_back(inst);
+		visiting.push_back(inst);
 		uint64_t out = 0;
 		if (!EvaluateInst(*inst, out, error)) {
 			return false;
 		}
-		m_visiting.pop_back();
-		m_cache.emplace(inst, out);
+		visiting.pop_back();
+		m_memo.Insert(inst, out);
 		result = out;
 		return true;
 	}
@@ -856,13 +984,12 @@ private:
 		                               ValueOpcodeName(inst.GetOpcode())));
 	}
 
-	const Program&                            m_program;
-	const SrtRuntime&                         m_runtime;
-	std::span<const uint8_t>                  m_clean_flat_slots;
-	Evaluator*                                m_clean_evaluator = nullptr;
-	uint32_t                                  m_use_pc          = 0;
-	std::unordered_map<const Inst*, uint64_t> m_cache;
-	std::vector<const Inst*>                  m_visiting;
+	const Program&           m_program;
+	const SrtRuntime&        m_runtime;
+	InstMemo&                m_memo;
+	std::span<const uint8_t> m_clean_flat_slots;
+	Evaluator*               m_clean_evaluator = nullptr;
+	uint32_t                 m_use_pc          = 0;
 };
 
 const DescriptorSource* Source(const Program& program, uint32_t source) {
@@ -892,8 +1019,11 @@ bool EvaluateRuntimeSourcesImpl(const Program&                           program
 	}
 	SrtRuntime clean_runtime  = runtime;
 	clean_runtime.read_memory = runtime.read_specialization_memory;
-	Evaluator                    clean_evaluator(program, clean_runtime);
-	Evaluator                    evaluator(program, runtime, clean_flat_slots, &clean_evaluator);
+	const auto expected_entries = program.srt_reads.size() + requests.size() * 8u;
+	MemoLease  clean_memo(expected_entries);
+	MemoLease  memo(expected_entries);
+	Evaluator  clean_evaluator(program, clean_runtime, *clean_memo);
+	Evaluator  evaluator(program, runtime, *memo, clean_flat_slots, &clean_evaluator);
 	std::vector<DescriptorValue> evaluated;
 	evaluated.reserve(requests.size());
 	for (const auto& request: requests) {
