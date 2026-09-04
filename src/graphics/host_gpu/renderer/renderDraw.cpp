@@ -1094,8 +1094,7 @@ static void SetDrawDebugPhase(CommandBuffer& buffer, uint64_t submit_id, const D
 	                    draw.flags, draw.instance_count, draw.first_instance);
 }
 
-static bool GetDrawTopology(const HW::UserConfig& ucfg, bool auto_draw,
-                            vk::PrimitiveTopology& topology) {
+static bool GetDrawTopology(const HW::UserConfig& ucfg, vk::PrimitiveTopology& topology) {
 
 	topology = vk::PrimitiveTopology::ePointList;
 
@@ -1117,14 +1116,11 @@ static bool GetDrawTopology(const HW::UserConfig& ucfg, bool auto_draw,
 		case Prospero::PrimitiveType::kTriStrip:
 			topology = vk::PrimitiveTopology::eTriangleStrip;
 			break;
+		// Both rect primitives give three vertices and derive the fourth corner in hardware; the
+		// tessellation pair in rectListShader.cpp does that on the host for a 3-point patch list.
 		case Prospero::PrimitiveType::kRectList:
-			topology = vk::PrimitiveTopology::ePatchList;
-			break;
 		case Prospero::PrimitiveType::kRectListLegacy:
-			if (!auto_draw) {
-				EXIT("unknown primitive type: %u\n", static_cast<uint32_t>(ucfg.GetPrimType()));
-			}
-			topology = vk::PrimitiveTopology::eTriangleStrip;
+			topology = vk::PrimitiveTopology::ePatchList;
 			break;
 		case Prospero::PrimitiveType::kQuadListLegacy:
 			topology = vk::PrimitiveTopology::eTriangleFan;
@@ -1348,8 +1344,7 @@ static void LogDrawStateIfNeeded(const CommandBuffer& buffer, const DrawCallInfo
 }
 
 static void EmitDrawPrimitives(const HW::UserConfig& ucfg, vk::CommandBuffer vk_buffer,
-                               const ShaderVertexInputInfo& vs_input_info, const DrawCallInfo& draw,
-                               const DrawEmitInfo& emit) {
+                               const DrawCallInfo& draw, const DrawEmitInfo& emit) {
 	EXIT_IF(draw.name == nullptr);
 
 	switch (ucfg.GetPrimType()) {
@@ -1360,6 +1355,7 @@ static void EmitDrawPrimitives(const HW::UserConfig& ucfg, vk::CommandBuffer vk_
 		case Prospero::PrimitiveType::kTriFan:
 		case Prospero::PrimitiveType::kTriStrip:
 		case Prospero::PrimitiveType::kRectList:
+		case Prospero::PrimitiveType::kRectListLegacy:
 			if (emit.indexed) {
 				vk_buffer.drawIndexed(draw.index_count, draw.instance_count, 0, emit.vertex_offset,
 				                      draw.first_instance);
@@ -1367,14 +1363,6 @@ static void EmitDrawPrimitives(const HW::UserConfig& ucfg, vk::CommandBuffer vk_
 				vk_buffer.draw(draw.index_count, draw.instance_count, emit.first_vertex,
 				               draw.first_instance);
 			}
-			break;
-		case Prospero::PrimitiveType::kRectListLegacy:
-			if (emit.indexed) {
-				EXIT("unknown primitive type: %u\n", static_cast<uint32_t>(ucfg.GetPrimType()));
-			}
-			// Sarah
-			EXIT_NOT_IMPLEMENTED(!(draw.index_count == 3 && vs_input_info.buffers_num == 0));
-			vk_buffer.draw(4, draw.instance_count, emit.first_vertex, draw.first_instance);
 			break;
 		case Prospero::PrimitiveType::kQuadListLegacy:
 			EXIT_NOT_IMPLEMENTED((draw.index_count & 0x3u) != 0);
@@ -1515,9 +1503,8 @@ void RenderExecutor::ExecutePreparedDraw(uint64_t submit_id, CommandBuffer& buff
 		vk_buffer.drawMeshTasksEXT(state.mesh.dispatch.workgroup_count, state.mesh.instance_count,
 		                           1);
 	} else {
-		EmitDrawPrimitives(ucfg, vk_buffer, state.vs_input_info, draw, emit);
+		EmitDrawPrimitives(ucfg, vk_buffer, draw, emit);
 	}
-
 	if (set_auto_debug) {
 		SetDrawDebugPhase(buffer, submit_id, draw, 0x600u);
 	}
@@ -1605,7 +1592,7 @@ void RenderExecutor::DrawIndex(uint64_t submit_id, CommandBuffer& buffer,
 	hw_check(buffer);
 
 	vk::PrimitiveTopology topology = vk::PrimitiveTopology::ePointList;
-	if (!GetDrawTopology(ucfg, false, topology)) {
+	if (!GetDrawTopology(ucfg, topology)) {
 		return;
 	}
 
@@ -1755,7 +1742,7 @@ void RenderExecutor::DrawAuto(uint64_t submit_id, CommandBuffer& buffer, uint32_
 	}
 
 	vk::PrimitiveTopology topology = vk::PrimitiveTopology::ePointList;
-	if (!GetDrawTopology(ucfg, true, topology)) {
+	if (!GetDrawTopology(ucfg, topology)) {
 		ResetBindings();
 		return;
 	}
@@ -1764,7 +1751,8 @@ void RenderExecutor::DrawAuto(uint64_t submit_id, CommandBuffer& buffer, uint32_
 		return;
 	}
 
-	const bool rect_list = topology == vk::PrimitiveTopology::ePatchList;
+	// Scoped to kRectList: this workaround has only ever covered primitive type 7.
+	const bool rect_list = ucfg.GetPrimType() == Prospero::PrimitiveType::kRectList;
 	if (rect_list && state.vs_input_info.buffers_num == 0 &&
 	    state.vs_input_info.param_export_mask == 0 && state.ps_input_info.input_num != 0) {
 		if (graphics_debug_dump_enabled()) {

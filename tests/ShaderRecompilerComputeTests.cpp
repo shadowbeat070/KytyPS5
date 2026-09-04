@@ -1396,6 +1396,9 @@ enum : u32 {
   OpCompositeExtract = 81,
   OpLabel = 248,
   OpReturn = 253,
+  ExecutionModelFragment = 4,
+  ExecutionModeOriginUpperLeft = 7,
+  OpConstantComposite = 44,
 };
 
 std::vector<u32> MakePassthroughVertexSpirv() {
@@ -1459,6 +1462,98 @@ std::vector<u32> MakePassthroughVertexSpirv() {
       {OpAccessChain, ptr_output_vec4, position_ptr, per_vertex, const_u32_0});
   b.AddFunction({OpStore, position_ptr, position});
   b.AddFunction({OpStore, out_color, color4});
+  b.AddFunction({OpReturn});
+  b.AddFunction({OpFunctionEnd});
+  return b.Build();
+}
+
+// Position-only vertex shader: one vec2 attribute straight into gl_Position. The rectangle-list
+// tessellation pair reads gl_in[].gl_Position and nothing else, so this is the whole guest-side
+// contract it needs.
+std::vector<u32> MakeRectPositionVertexSpirv() {
+  using ShaderRecompiler::Spirv::Builder;
+
+  Builder b;
+  const auto void_type = b.Type(OpTypeVoid);
+  const auto uint_type = b.Type(OpTypeInt, {32, 0});
+  const auto float_type = b.Type(OpTypeFloat, {32});
+  const auto vec2_type = b.Type(OpTypeVector, {float_type, 2});
+  const auto vec4_type = b.Type(OpTypeVector, {float_type, 4});
+  const auto per_vertex_type = b.DecoratedType(
+      OpTypeStruct, {vec4_type},
+      {{OpDecorate, {DecorationBlock}},
+       {OpMemberDecorate, {0, DecorationBuiltIn, BuiltInPosition}}});
+  const auto ptr_input_vec2 =
+      b.Type(OpTypePointer, {StorageClassInput, vec2_type});
+  const auto ptr_output_vec4 =
+      b.Type(OpTypePointer, {StorageClassOutput, vec4_type});
+  const auto ptr_output_per_vertex =
+      b.Type(OpTypePointer, {StorageClassOutput, per_vertex_type});
+  const auto func_type = b.Type(OpTypeFunction, {void_type});
+  const auto const_u32_0 = b.Constant(OpConstant, uint_type, {0});
+  const auto const_f32_0 = b.Constant(OpConstant, float_type, {0x00000000u});
+  const auto const_f32_1 = b.Constant(OpConstant, float_type, {0x3f800000u});
+  const auto in_pos = b.DefineGlobalVariable(ptr_input_vec2, StorageClassInput);
+  const auto per_vertex =
+      b.DefineGlobalVariable(ptr_output_per_vertex, StorageClassOutput);
+  const auto main = b.AllocateId();
+  const auto label = b.AllocateId();
+  const auto pos2 = b.AllocateId();
+  const auto pos_x = b.AllocateId();
+  const auto pos_y = b.AllocateId();
+  const auto position = b.AllocateId();
+  const auto position_ptr = b.AllocateId();
+
+  b.RequireCapability(CapabilityShader);
+  b.AddMemoryModel({AddressingModelLogical, MemoryModelGLSL450});
+  b.AddEntryPoint(ExecutionModelVertex, main, "main", {in_pos, per_vertex});
+  b.AddAnnotation({OpDecorate, in_pos, DecorationLocation, 0});
+
+  b.AddFunction({OpFunction, void_type, main, FunctionControlNone, func_type});
+  b.AddFunction({OpLabel, label});
+  b.AddFunction({OpLoad, vec2_type, pos2, in_pos});
+  b.AddFunction({OpCompositeExtract, float_type, pos_x, pos2, 0});
+  b.AddFunction({OpCompositeExtract, float_type, pos_y, pos2, 1});
+  b.AddFunction({OpCompositeConstruct, vec4_type, position, pos_x, pos_y,
+                 const_f32_0, const_f32_1});
+  b.AddFunction(
+      {OpAccessChain, ptr_output_vec4, position_ptr, per_vertex, const_u32_0});
+  b.AddFunction({OpStore, position_ptr, position});
+  b.AddFunction({OpReturn});
+  b.AddFunction({OpFunctionEnd});
+  return b.Build();
+}
+
+// Fragment shader that writes opaque white, so a readback answers one question only: was this
+// pixel covered by the expanded rectangle?
+std::vector<u32> MakeConstantFragmentSpirv() {
+  using ShaderRecompiler::Spirv::Builder;
+
+  Builder b;
+  const auto void_type = b.Type(OpTypeVoid);
+  const auto float_type = b.Type(OpTypeFloat, {32});
+  const auto vec4_type = b.Type(OpTypeVector, {float_type, 4});
+  const auto ptr_output_vec4 =
+      b.Type(OpTypePointer, {StorageClassOutput, vec4_type});
+  const auto func_type = b.Type(OpTypeFunction, {void_type});
+  const auto const_f32_1 = b.Constant(OpConstant, float_type, {0x3f800000u});
+  const auto white = b.Constant(
+      OpConstantComposite, vec4_type,
+      {const_f32_1, const_f32_1, const_f32_1, const_f32_1});
+  const auto out_color =
+      b.DefineGlobalVariable(ptr_output_vec4, StorageClassOutput);
+  const auto main = b.AllocateId();
+  const auto label = b.AllocateId();
+
+  b.RequireCapability(CapabilityShader);
+  b.AddMemoryModel({AddressingModelLogical, MemoryModelGLSL450});
+  b.AddEntryPoint(ExecutionModelFragment, main, "main", {out_color});
+  b.AddExecutionMode({main, ExecutionModeOriginUpperLeft});
+  b.AddAnnotation({OpDecorate, out_color, DecorationLocation, 0});
+
+  b.AddFunction({OpFunction, void_type, main, FunctionControlNone, func_type});
+  b.AddFunction({OpLabel, label});
+  b.AddFunction({OpStore, out_color, white});
   b.AddFunction({OpReturn});
   b.AddFunction({OpFunctionEnd});
   return b.Build();
@@ -10097,6 +10192,293 @@ public:
     return pixel;
   }
 
+  // Rectangle lists reach the host as a three-control-point patch list expanded by
+  // BuildRectListShaders: three vertices describe an axis-aligned rectangle and the fourth corner
+  // is derived. What matters is therefore coverage -- the correct pixels, for any ordering of the
+  // three corners, for more than one rectangle in a single draw, and for an indexed draw. The
+  // last two are exactly the shapes the legacy rectangle path used to abort on.
+  void CheckRectListRasterization() {
+    constexpr const char *name = "RectListRasterization";
+    constexpr u32 kExtent = 8;
+    constexpr u32 kHalf = kExtent / 2;
+
+    ShaderVertexInputInfo vertex_info{};
+    const auto rect_shaders = BuildRectListShaders(vertex_info, nullptr);
+    ValidateSpirv(name, rect_shaders.control);
+    ValidateSpirv(name, rect_shaders.evaluation);
+    const auto vertex_spirv = TestSpv::MakeRectPositionVertexSpirv();
+    const auto fragment_spirv = TestSpv::MakeConstantFragmentSpirv();
+    ValidateSpirv(name, vertex_spirv);
+    ValidateSpirv(name, fragment_spirv);
+
+    const auto make_module = [&](const std::vector<u32> &spirv) {
+      vk::ShaderModuleCreateInfo module_info{};
+      module_info.sType = vk::StructureType::eShaderModuleCreateInfo;
+      module_info.codeSize = spirv.size() * sizeof(u32);
+      module_info.pCode = spirv.data();
+      vk::ShaderModule module = nullptr;
+      RequireVk(name, "graphics",
+                m_device.createShaderModule(&module_info, nullptr, &module),
+                "vkCreateShaderModule");
+      return module;
+    };
+    vk::ShaderModule vertex_module = make_module(vertex_spirv);
+    vk::ShaderModule control_module = make_module(rect_shaders.control);
+    vk::ShaderModule evaluation_module = make_module(rect_shaders.evaluation);
+    vk::ShaderModule fragment_module = make_module(fragment_spirv);
+
+    vk::PipelineLayoutCreateInfo layout_info{};
+    layout_info.sType = vk::StructureType::ePipelineLayoutCreateInfo;
+    vk::PipelineLayout pipeline_layout = nullptr;
+    RequireVk(name, "graphics",
+              m_device.createPipelineLayout(&layout_info, nullptr,
+                                            &pipeline_layout),
+              "vkCreatePipelineLayout");
+
+    const std::array<vk::ShaderStageFlagBits, 4> stage_flags{
+        vk::ShaderStageFlagBits::eVertex,
+        vk::ShaderStageFlagBits::eTessellationControl,
+        vk::ShaderStageFlagBits::eTessellationEvaluation,
+        vk::ShaderStageFlagBits::eFragment,
+    };
+    const std::array<vk::ShaderModule, 4> stage_modules{
+        vertex_module, control_module, evaluation_module, fragment_module};
+    vk::PipelineShaderStageCreateInfo stages[4] = {};
+    for (u32 i = 0; i < 4; i++) {
+      stages[i].sType = vk::StructureType::ePipelineShaderStageCreateInfo;
+      stages[i].stage = stage_flags[i];
+      stages[i].module = stage_modules[i];
+      stages[i].pName = "main";
+    }
+
+    vk::VertexInputBindingDescription vertex_binding{};
+    vertex_binding.binding = 0;
+    vertex_binding.stride = 2u * sizeof(float);
+    vertex_binding.inputRate = vk::VertexInputRate::eVertex;
+    vk::VertexInputAttributeDescription attribute{};
+    attribute.location = 0;
+    attribute.binding = 0;
+    attribute.format = vk::Format::eR32G32Sfloat;
+    attribute.offset = 0;
+    vk::PipelineVertexInputStateCreateInfo vertex_input{};
+    vertex_input.sType = vk::StructureType::ePipelineVertexInputStateCreateInfo;
+    vertex_input.vertexBindingDescriptionCount = 1;
+    vertex_input.pVertexBindingDescriptions = &vertex_binding;
+    vertex_input.vertexAttributeDescriptionCount = 1;
+    vertex_input.pVertexAttributeDescriptions = &attribute;
+
+    vk::PipelineInputAssemblyStateCreateInfo input_assembly{};
+    input_assembly.sType =
+        vk::StructureType::ePipelineInputAssemblyStateCreateInfo;
+    input_assembly.topology = vk::PrimitiveTopology::ePatchList;
+
+    vk::PipelineTessellationStateCreateInfo tessellation{};
+    tessellation.sType =
+        vk::StructureType::ePipelineTessellationStateCreateInfo;
+    tessellation.patchControlPoints = 3;
+
+    vk::Viewport viewport{};
+    viewport.width = static_cast<float>(kExtent);
+    viewport.height = static_cast<float>(kExtent);
+    viewport.minDepth = 0.0f;
+    viewport.maxDepth = 1.0f;
+    vk::Rect2D scissor{};
+    scissor.extent.width = kExtent;
+    scissor.extent.height = kExtent;
+    vk::PipelineViewportStateCreateInfo viewport_state{};
+    viewport_state.sType = vk::StructureType::ePipelineViewportStateCreateInfo;
+    viewport_state.viewportCount = 1;
+    viewport_state.pViewports = &viewport;
+    viewport_state.scissorCount = 1;
+    viewport_state.pScissors = &scissor;
+
+    vk::PipelineRasterizationStateCreateInfo raster{};
+    raster.sType = vk::StructureType::ePipelineRasterizationStateCreateInfo;
+    raster.polygonMode = vk::PolygonMode::eFill;
+    // The renderer disables culling for rectangle lists (pipelineCache.cpp): the derived corner
+    // leaves the winding of the two generated triangles up to the guest vertex order.
+    raster.cullMode = vk::CullModeFlagBits::eNone;
+    raster.frontFace = vk::FrontFace::eCounterClockwise;
+    raster.lineWidth = 1.0f;
+
+    vk::PipelineMultisampleStateCreateInfo multisample{};
+    multisample.sType = vk::StructureType::ePipelineMultisampleStateCreateInfo;
+    multisample.rasterizationSamples = vk::SampleCountFlagBits::e1;
+
+    vk::PipelineColorBlendAttachmentState color_attachment{};
+    color_attachment.colorWriteMask =
+        vk::ColorComponentFlagBits::eR | vk::ColorComponentFlagBits::eG |
+        vk::ColorComponentFlagBits::eB | vk::ColorComponentFlagBits::eA;
+    vk::PipelineColorBlendStateCreateInfo color_blend{};
+    color_blend.sType = vk::StructureType::ePipelineColorBlendStateCreateInfo;
+    color_blend.attachmentCount = 1;
+    color_blend.pAttachments = &color_attachment;
+
+    const vk::Format color_format = vk::Format::eR32G32B32A32Sfloat;
+    vk::PipelineRenderingCreateInfo rendering_pipeline{};
+    rendering_pipeline.sType = vk::StructureType::ePipelineRenderingCreateInfo;
+    rendering_pipeline.colorAttachmentCount = 1;
+    rendering_pipeline.pColorAttachmentFormats = &color_format;
+
+    vk::GraphicsPipelineCreateInfo pipeline_info{};
+    pipeline_info.sType = vk::StructureType::eGraphicsPipelineCreateInfo;
+    pipeline_info.pNext = &rendering_pipeline;
+    pipeline_info.stageCount = 4;
+    pipeline_info.pStages = stages;
+    pipeline_info.pVertexInputState = &vertex_input;
+    pipeline_info.pInputAssemblyState = &input_assembly;
+    pipeline_info.pTessellationState = &tessellation;
+    pipeline_info.pViewportState = &viewport_state;
+    pipeline_info.pRasterizationState = &raster;
+    pipeline_info.pMultisampleState = &multisample;
+    pipeline_info.pColorBlendState = &color_blend;
+    pipeline_info.layout = pipeline_layout;
+    vk::Pipeline pipeline = nullptr;
+    RequireVk(name, "graphics",
+              m_device.createGraphicsPipelines(nullptr, 1, &pipeline_info,
+                                               nullptr, &pipeline),
+              "vkCreateGraphicsPipelines");
+
+    const auto ndc = [](float value) { return std::bit_cast<u32>(value); };
+    const auto render = [&](const std::vector<u32> &vertices,
+                            const std::vector<u32> &indices) {
+      Image target = CreateImage2D(name, kExtent, kExtent, color_format,
+                                   vk::ImageUsageFlagBits::eColorAttachment, {},
+                                   4, vk::ImageLayout::eGeneral);
+      auto vertex_buffer =
+          CreateHostBuffer(name, vertices.size() * sizeof(u32),
+                           vk::BufferUsageFlagBits::eVertexBuffer, vertices);
+      Buffer index_buffer{};
+      if (!indices.empty()) {
+        index_buffer =
+            CreateHostBuffer(name, indices.size() * sizeof(u32),
+                             vk::BufferUsageFlagBits::eIndexBuffer, indices);
+      }
+
+      vk::CommandBuffer cmd = BeginCommands(name, "graphics");
+      vk::RenderingAttachmentInfo color{};
+      color.sType = vk::StructureType::eRenderingAttachmentInfo;
+      color.imageView = target.view;
+      color.imageLayout = vk::ImageLayout::eGeneral;
+      color.loadOp = vk::AttachmentLoadOp::eClear;
+      color.storeOp = vk::AttachmentStoreOp::eStore;
+      vk::RenderingInfo rendering{};
+      rendering.sType = vk::StructureType::eRenderingInfo;
+      rendering.renderArea.extent.width = kExtent;
+      rendering.renderArea.extent.height = kExtent;
+      rendering.layerCount = 1;
+      rendering.colorAttachmentCount = 1;
+      rendering.pColorAttachments = &color;
+      cmd.beginRendering(rendering);
+      cmd.bindPipeline(vk::PipelineBindPoint::eGraphics, pipeline);
+      vk::DeviceSize offset = 0;
+      cmd.bindVertexBuffers(0, 1, &vertex_buffer.buffer, &offset);
+      if (indices.empty()) {
+        cmd.draw(static_cast<u32>(vertices.size() / 2u), 1, 0, 0);
+      } else {
+        cmd.bindIndexBuffer(index_buffer.buffer, 0, vk::IndexType::eUint32);
+        cmd.drawIndexed(static_cast<u32>(indices.size()), 1, 0, 0, 0);
+      }
+      cmd.endRendering();
+      EndSubmitAndFree(name, "graphics", cmd);
+      target.layout = vk::ImageLayout::eGeneral;
+
+      const auto pixels = ReadImage(name, &target);
+      DestroyImage(&target);
+      DestroyBuffer(&vertex_buffer);
+      if (index_buffer.buffer != nullptr) {
+        DestroyBuffer(&index_buffer);
+      }
+
+      std::vector<bool> covered(static_cast<size_t>(kExtent) * kExtent, false);
+      for (size_t i = 0; i < covered.size(); i++) {
+        covered[i] = pixels[i * 4u] != 0u;
+      }
+      return covered;
+    };
+
+    const auto describe = [&](const std::vector<bool> &covered) {
+      std::string text;
+      for (u32 y = 0; y < kExtent; y++) {
+        for (u32 x = 0; x < kExtent; x++) {
+          text += covered[static_cast<size_t>(y) * kExtent + x] ? "#" : ".";
+        }
+        text += "/";
+      }
+      return text;
+    };
+    const auto matches = [&](const std::vector<bool> &covered,
+                             auto &&expected) {
+      for (u32 y = 0; y < kExtent; y++) {
+        for (u32 x = 0; x < kExtent; x++) {
+          if (covered[static_cast<size_t>(y) * kExtent + x] != expected(x, y)) {
+            return false;
+          }
+        }
+      }
+      return true;
+    };
+
+    // Top-left quadrant, given by three of its corners: x in [-1, 0] and y in [-1, 0] in clip
+    // space. The fourth corner, (0, 0), is the one the expansion has to invent.
+    const std::array<std::array<u32, 2>, 3> top_left_corners{{
+        {ndc(-1.0f), ndc(-1.0f)},
+        {ndc(-1.0f), ndc(0.0f)},
+        {ndc(0.0f), ndc(-1.0f)},
+    }};
+    const auto is_top_left = [&](u32 x, u32 y) {
+      return x < kHalf && y < kHalf;
+    };
+
+    // Any rotation of the three corners describes the same rectangle, so all three must render
+    // identically: nothing in the expansion may depend on which corner comes first.
+    for (u32 rotation = 0; rotation < 3; rotation++) {
+      std::vector<u32> vertices;
+      for (u32 i = 0; i < 3; i++) {
+        const auto &corner = top_left_corners[(i + rotation) % 3u];
+        vertices.push_back(corner[0]);
+        vertices.push_back(corner[1]);
+      }
+      const auto covered = render(vertices, {});
+      Require(
+          name, "single rectangle", matches(covered, is_top_left),
+          fmt::format("corner rotation {} covered {} instead of the top-left "
+                      "quadrant",
+                      rotation, describe(covered)));
+    }
+
+    // Two rectangles in one draw: floor(vertexCount / 3) primitives. The legacy path aborted on
+    // any vertex count other than three.
+    const std::vector<u32> two_rect_vertices{
+        ndc(-1.0f), ndc(-1.0f), ndc(-1.0f), ndc(0.0f),  ndc(0.0f), ndc(-1.0f),
+        ndc(0.0f),  ndc(0.0f),  ndc(0.0f),  ndc(1.0f),  ndc(1.0f), ndc(0.0f),
+    };
+    const auto is_diagonal = [&](u32 x, u32 y) {
+      return (x < kHalf && y < kHalf) || (x >= kHalf && y >= kHalf);
+    };
+    const auto two_rects = render(two_rect_vertices, {});
+    Require(name, "two rectangles", matches(two_rects, is_diagonal),
+            fmt::format("six vertices covered {} instead of both diagonal "
+                        "quadrants",
+                        describe(two_rects)));
+
+    // The same pair of rectangles through an index buffer, in the opposite order. The legacy path
+    // rejected indexed rectangle lists outright.
+    const std::vector<u32> swapped_indices{3, 4, 5, 0, 1, 2};
+    const auto indexed = render(two_rect_vertices, swapped_indices);
+    Require(name, "indexed rectangles", matches(indexed, is_diagonal),
+            fmt::format("an indexed rectangle list covered {} instead of both "
+                        "diagonal quadrants",
+                        describe(indexed)));
+
+    m_device.destroyPipeline(pipeline, nullptr);
+    m_device.destroyPipelineLayout(pipeline_layout, nullptr);
+    m_device.destroyShaderModule(fragment_module, nullptr);
+    m_device.destroyShaderModule(evaluation_module, nullptr);
+    m_device.destroyShaderModule(control_module, nullptr);
+    m_device.destroyShaderModule(vertex_module, nullptr);
+  }
+
   void CheckGpuTilerCpuParity() {
     constexpr const char *name = "GpuTilerCpuParity";
     EnsureRuntimeContext();
@@ -11311,6 +11693,9 @@ private:
     Require("VulkanHarness", "dispatch",
             available_features.sampleRateShading == true,
             "sample-rate shading is not supported");
+    Require("VulkanHarness", "dispatch",
+            available_features.tessellationShader == true,
+            "tessellation shaders are required to expand rectangle lists");
     Require("VulkanHarness", "dispatch", available_features.shaderInt64 == true,
             "shaderInt64 is not supported");
     Require("VulkanHarness", "dispatch",
@@ -11348,6 +11733,9 @@ private:
     device_features.shaderStorageImageWriteWithoutFormat = true;
     device_features.sampleRateShading = true;
     device_features.shaderInt64 = true;
+    // Rectangle lists are expanded with a tessellation control/evaluation pair, exactly as the
+    // renderer does for primitive types 7 and 17.
+    device_features.tessellationShader = true;
     device_info.pEnabledFeatures = &device_features;
     constexpr const char *device_extensions[] = {
         VK_KHR_PUSH_DESCRIPTOR_EXTENSION_NAME,
@@ -24590,6 +24978,12 @@ int main(int argc, char **argv) {
     vulkan.CheckStreamBufferRing();
     return 0;
   }
+  if (argc == 2 && std::strcmp(argv[1], "--rect-list-only") == 0) {
+    VulkanHarness vulkan;
+    CheckRectListShaders();
+    vulkan.CheckRectListRasterization();
+    return 0;
+  }
   if (argc == 2 && std::strcmp(argv[1], "--gpu-tiler-only") == 0) {
     VulkanHarness vulkan;
     vulkan.CheckGpuTilerCpuParity();
@@ -24825,6 +25219,7 @@ int main(int argc, char **argv) {
   CheckMeshStageRecompile();
   CheckPixelAncillaryLayerInput();
   CheckRectListShaders();
+  vulkan.CheckRectListRasterization();
   CheckIndirectImageKeySwitch();
   CheckPs5GameExampleImageClearRuntimeShape();
   vulkan.CheckSchedulerTimeline();
