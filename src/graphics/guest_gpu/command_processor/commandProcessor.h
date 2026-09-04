@@ -154,9 +154,9 @@ private:
 
 	void ProcessPm4(Pm4Execution& execution, size_t stop_depth);
 	void SuspendPm4();
-	void SubmitNonIndexedDraw(uint32_t vertex_count, uint32_t flags,
+	void SubmitNonIndexedDraw(const char* what, uint32_t vertex_count, uint32_t flags,
 	                          uint32_t render_target_slice_offset, uint32_t first_vertex,
-	                          uint32_t first_instance);
+	                          uint32_t first_instance, uint32_t instance_count);
 
 	CommandScheduler&   GetScheduler() const { return m_renderer.GetCommandScheduler(); }
 	CommandBuffer&      CurrentBuffer() { return GetScheduler().Current(); }
@@ -175,7 +175,8 @@ private:
 	uint64_t         m_index_base_addr                  = 0;
 	uint64_t         m_draw_indirect_args_base_addr     = 0;
 	uint64_t         m_dispatch_indirect_args_base_addr = 0;
-	// Persistent draw state: indirect draws update it for subsequent draws.
+	// VGT_NUM_INSTANCES: written only by IT_NUM_INSTANCES, read by draws carrying no count of
+	// their own. An indirect draw uses its argument buffer and leaves this alone, as the hw does.
 	uint32_t m_num_instances = 1;
 
 	uint32_t m_de_count    = 0;

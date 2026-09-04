@@ -67,6 +67,23 @@ static bool GraphicsRunDebugDumpEnabled() {
 	       Config::GetPrintfDirection() != Config::OutputDirection::Silent;
 }
 
+// 2^28 vertices, far beyond any real frame. Issuing such a draw wedges the GPU until Windows
+// resets the driver, after which every Vulkan call fails with VK_ERROR_DEVICE_LOST.
+static constexpr uint64_t kMaxDrawVertexWork = 1ull << 28;
+
+static bool DrawWorkIsImplausible(const char* what, uint32_t count, uint32_t instance_count) {
+	if (static_cast<uint64_t>(count) * instance_count <= kMaxDrawVertexWork) {
+		return false;
+	}
+	static std::atomic<uint32_t> log_count {0};
+	if (log_count.fetch_add(1, std::memory_order_relaxed) < 64) {
+		LOGF("\t warning: %s asks for %" PRIu32 " x %" PRIu32
+		     " vertices; the instance count is not plausible, so the draw is skipped\n",
+		     what, count, instance_count);
+	}
+	return true;
+}
+
 GuestGpu::GuestGpu(RenderContext& renderer): m_renderer(renderer) {
 	EXIT_NOT_IMPLEMENTED(!Common::Thread::IsMainThread());
 	GraphicsInitJmpTables();
@@ -912,8 +929,13 @@ void CommandProcessor::DrawIndex(uint32_t index_count, const void* index_addr, u
                                  uint32_t first_instance) {
 	CheckBuffer();
 
-	if (instance_count == 0) {
+	const bool from_register = (instance_count == 0);
+	if (from_register) {
 		instance_count = m_num_instances;
+	}
+	if (DrawWorkIsImplausible(from_register ? "DrawIndex (VGT_NUM_INSTANCES)" : "DrawIndex",
+	                          index_count, instance_count)) {
+		return;
 	}
 	if (object_ids != nullptr) {
 		LOGF("\t draw indexed multi-instanced objectIds = 0x%016" PRIx64 "\n",
@@ -990,9 +1012,9 @@ void CommandProcessor::DrawIndirect(uint32_t data_offset, uint32_t draw_initiato
 				     args.start_vertex_location, args.start_instance_location);
 			}
 		}
-		m_num_instances = args.instance_count;
-		SubmitNonIndexedDraw(args.vertex_count_per_instance, 0, 0, args.start_vertex_location,
-		                     args.start_instance_location);
+		SubmitNonIndexedDraw("DrawIndirect", args.vertex_count_per_instance, 0, 0,
+		                     args.start_vertex_location, args.start_instance_location,
+		                     args.instance_count);
 		return;
 	}
 
@@ -1032,7 +1054,12 @@ void CommandProcessor::DrawIndirect(uint32_t data_offset, uint32_t draw_initiato
 		}
 	}
 
-	m_num_instances = args.instance_count;
+	if (args.instance_count == 0) {
+		return;
+	}
+	if (DrawWorkIsImplausible("DrawIndexIndirect", index_count, args.instance_count)) {
+		return;
+	}
 	DrawIndex(index_count, index_addr, 0, 1, args.instance_count, nullptr, 0,
 	          static_cast<int32_t>(args.base_vertex_location), args.start_instance_location);
 }
@@ -1090,9 +1117,9 @@ void CommandProcessor::DrawIndirectMulti(uint32_t data_offset, uint32_t max_coun
 					     args->start_vertex_location, args->start_instance_location);
 				}
 			}
-			m_num_instances = args->instance_count;
-			SubmitNonIndexedDraw(args->vertex_count_per_instance, 0, 0, args->start_vertex_location,
-			                     args->start_instance_location);
+			SubmitNonIndexedDraw("DrawIndirectMulti", args->vertex_count_per_instance, 0, 0,
+			                     args->start_vertex_location, args->start_instance_location,
+			                     args->instance_count);
 			continue;
 		}
 
@@ -1133,7 +1160,12 @@ void CommandProcessor::DrawIndirectMulti(uint32_t data_offset, uint32_t max_coun
 			}
 		}
 
-		m_num_instances = args->instance_count;
+		if (args->instance_count == 0) {
+			continue;
+		}
+		if (DrawWorkIsImplausible("DrawIndexIndirectMulti", index_count, args->instance_count)) {
+			continue;
+		}
 		DrawIndex(index_count, index_addr, 0, 1, args->instance_count, nullptr, 0,
 		          static_cast<int32_t>(args->base_vertex_location), args->start_instance_location);
 	}
@@ -1230,18 +1262,27 @@ void CommandProcessor::DispatchIndirect(uint32_t data_offset, uint32_t mode) {
 
 void CommandProcessor::DrawIndexAuto(uint32_t index_count, uint32_t flags,
                                      uint32_t render_target_slice_offset) {
-	SubmitNonIndexedDraw(index_count, flags, render_target_slice_offset, 0, 0);
+	SubmitNonIndexedDraw("DrawAuto", index_count, flags, render_target_slice_offset, 0, 0,
+	                     m_num_instances);
 }
 
-void CommandProcessor::SubmitNonIndexedDraw(uint32_t vertex_count, uint32_t flags,
+void CommandProcessor::SubmitNonIndexedDraw(const char* what, uint32_t vertex_count, uint32_t flags,
                                             uint32_t render_target_slice_offset,
-                                            uint32_t first_vertex, uint32_t first_instance) {
+                                            uint32_t first_vertex, uint32_t first_instance,
+                                            uint32_t instance_count) {
 	CheckBuffer();
 
-	RecordDrawForDebugger(Debugger::Graphics::DrawKind::Draw, vertex_count, m_num_instances);
+	if (instance_count == 0) {
+		return;
+	}
+	if (DrawWorkIsImplausible(what, vertex_count, instance_count)) {
+		return;
+	}
+
+	RecordDrawForDebugger(Debugger::Graphics::DrawKind::Draw, vertex_count, instance_count);
 
 	m_renderer.GetRenderExecutor().DrawAuto(m_submit_id, CurrentBuffer(), vertex_count, flags,
-	                                        render_target_slice_offset, m_num_instances,
+	                                        render_target_slice_offset, instance_count,
 	                                        first_vertex, first_instance);
 }
 
