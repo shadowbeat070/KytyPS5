@@ -782,6 +782,10 @@ std::vector<BreakCondition> BreakConditions() {
 }
 
 bool TakeBreakRequest(std::string& reason) {
+	// Called per completed submission; do not take the global mutex to find no break pending.
+	if (!IsCapturing()) {
+		return false;
+	}
 	const std::lock_guard lock(g_mutex);
 	if (g_pending_break_reason.empty()) return false;
 	reason = std::move(g_pending_break_reason);
