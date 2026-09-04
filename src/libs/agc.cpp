@@ -67,6 +67,12 @@ void Shutdown() {
 	g_renderer = nullptr;
 }
 
+// LOGF gates at runtime, after its arguments are formatted, so check the sink first.
+static bool agc_debug_dump_enabled() {
+	return Config::GraphicsDebugDumpEnabledFast() &&
+	       Config::GetPrintfDirectionFast() != Config::OutputDirection::Silent;
+}
+
 void GraphicsDbgDumpDcb(const char* type, uint32_t num_dw, const uint32_t* cmd_buffer) {
 	EXIT_IF(type == nullptr);
 
@@ -4227,10 +4233,12 @@ int KYTY_SYSV_ABI AgcDriverSubmitDcb(const Packet* packet) {
 
 	EXIT_NOT_IMPLEMENTED(packet == nullptr);
 
-	LOGF("\t addr   = 0x%016" PRIx64 "\n"
-	     "\t dw_num = 0x%08" PRIx32 "\n"
-	     "\t flags  = 0x%02" PRIx8 "\n",
-	     reinterpret_cast<uint64_t>(packet->addr), packet->dw_num, packet->flags);
+	if (agc_debug_dump_enabled()) {
+		LOGF("\t addr   = 0x%016" PRIx64 "\n"
+		     "\t dw_num = 0x%08" PRIx32 "\n"
+		     "\t flags  = 0x%02" PRIx8 "\n",
+		     reinterpret_cast<uint64_t>(packet->addr), packet->dw_num, packet->flags);
+	}
 
 	submit_dcb(packet->addr, packet->dw_num);
 
@@ -4241,7 +4249,9 @@ int KYTY_SYSV_ABI AgcDriverSubmitMultiDcbs(uint32_t* const* dcb_gpu_addrs,
                                            const uint32_t* dcb_sizes_in_dwords, uint32_t count) {
 	PRINT_NAME();
 
-	LOGF("\t count = %" PRIu32 "\n", count);
+	if (agc_debug_dump_enabled()) {
+		LOGF("\t count = %" PRIu32 "\n", count);
+	}
 
 	if (count == 0) {
 		return OK;
@@ -4254,9 +4264,11 @@ int KYTY_SYSV_ABI AgcDriverSubmitMultiDcbs(uint32_t* const* dcb_gpu_addrs,
 		auto*    dcb            = dcb_gpu_addrs[i];
 		uint32_t size_in_dwords = dcb_sizes_in_dwords[i];
 
-		LOGF("\t dcb[%" PRIu32 "]  = 0x%016" PRIx64 "\n"
-		     "\t size[%" PRIu32 "] = 0x%08" PRIx32 "\n",
-		     i, reinterpret_cast<uint64_t>(dcb), i, size_in_dwords);
+		if (agc_debug_dump_enabled()) {
+			LOGF("\t dcb[%" PRIu32 "]  = 0x%016" PRIx64 "\n"
+			     "\t size[%" PRIu32 "] = 0x%08" PRIx32 "\n",
+			     i, reinterpret_cast<uint64_t>(dcb), i, size_in_dwords);
+		}
 
 		if (dcb != nullptr) {
 			submit_dcb(dcb, size_in_dwords);
@@ -4271,8 +4283,10 @@ static void submit_acb(uint32_t queue, uint32_t* acb, uint32_t size_in_dwords) {
 		return;
 	}
 
-	for (uint32_t i = 0; i < std::min<uint32_t>(size_in_dwords, 8); i++) {
-		LOGF("\t acb[%u] = 0x%08" PRIx32 "\n", i, acb[i]);
+	if (agc_debug_dump_enabled()) {
+		for (uint32_t i = 0; i < std::min<uint32_t>(size_in_dwords, 8); i++) {
+			LOGF("\t acb[%u] = 0x%08" PRIx32 "\n", i, acb[i]);
+		}
 	}
 
 	GraphicsDbgDumpDcb("a", size_in_dwords, acb);
@@ -4302,20 +4316,24 @@ static void submit_command_buffer(uint32_t queue, uint32_t* commands, uint32_t s
 int KYTY_SYSV_ABI AgcDriverSubmitCommandBuffer(void* queue_context, const Packet* packet) {
 	PRINT_NAME();
 
-	LOGF("\t queue_context = 0x%016" PRIx64 "\n"
-	     "\t packet        = 0x%016" PRIx64 "\n",
-	     reinterpret_cast<uint64_t>(queue_context), reinterpret_cast<uint64_t>(packet));
+	if (agc_debug_dump_enabled()) {
+		LOGF("\t queue_context = 0x%016" PRIx64 "\n"
+		     "\t packet        = 0x%016" PRIx64 "\n",
+		     reinterpret_cast<uint64_t>(queue_context), reinterpret_cast<uint64_t>(packet));
+	}
 
 	if (queue_context == nullptr || packet == nullptr) {
 		return LibKernel::KERNEL_ERROR_EINVAL;
 	}
 
 	const uint32_t queue = get_driver_queue(queue_context);
-	LOGF("\t queue = 0x%08" PRIx32 "\n"
-	     "\t addr  = 0x%016" PRIx64 "\n"
-	     "\t size  = 0x%08" PRIx32 "\n"
-	     "\t flags = 0x%02" PRIx8 "\n",
-	     queue, reinterpret_cast<uint64_t>(packet->addr), packet->dw_num, packet->flags);
+	if (agc_debug_dump_enabled()) {
+		LOGF("\t queue = 0x%08" PRIx32 "\n"
+		     "\t addr  = 0x%016" PRIx64 "\n"
+		     "\t size  = 0x%08" PRIx32 "\n"
+		     "\t flags = 0x%02" PRIx8 "\n",
+		     queue, reinterpret_cast<uint64_t>(packet->addr), packet->dw_num, packet->flags);
+	}
 
 	submit_command_buffer(queue, packet->addr, packet->dw_num);
 	return OK;
@@ -4327,9 +4345,11 @@ int KYTY_SYSV_ABI AgcDriverSubmitMultiCommandBuffers(void*            queue_cont
                                                      uint32_t         count) {
 	PRINT_NAME();
 
-	LOGF("\t queue_context = 0x%016" PRIx64 "\n"
-	     "\t count         = %" PRIu32 "\n",
-	     reinterpret_cast<uint64_t>(queue_context), count);
+	if (agc_debug_dump_enabled()) {
+		LOGF("\t queue_context = 0x%016" PRIx64 "\n"
+		     "\t count         = %" PRIu32 "\n",
+		     reinterpret_cast<uint64_t>(queue_context), count);
+	}
 
 	if (count == 0) {
 		return OK;
@@ -4348,17 +4368,21 @@ int KYTY_SYSV_ABI AgcDriverSubmitMultiCommandBuffers(void*            queue_cont
 int KYTY_SYSV_ABI AgcDriverSubmitAcb(uint32_t queue, const Packet* packet) {
 	PRINT_NAME();
 
-	LOGF("\t queue  = 0x%08" PRIx32 "\n"
-	     "\t packet = 0x%016" PRIx64 "\n",
-	     queue, reinterpret_cast<uint64_t>(packet));
+	if (agc_debug_dump_enabled()) {
+		LOGF("\t queue  = 0x%08" PRIx32 "\n"
+		     "\t packet = 0x%016" PRIx64 "\n",
+		     queue, reinterpret_cast<uint64_t>(packet));
+	}
 
 	if (packet == nullptr) {
 		return OK;
 	}
-	LOGF("\t acb   = 0x%016" PRIx64 "\n"
-	     "\t size  = 0x%08" PRIx32 "\n"
-	     "\t flags = 0x%02" PRIx8 "\n",
-	     reinterpret_cast<uint64_t>(packet->addr), packet->dw_num, packet->flags);
+	if (agc_debug_dump_enabled()) {
+		LOGF("\t acb   = 0x%016" PRIx64 "\n"
+		     "\t size  = 0x%08" PRIx32 "\n"
+		     "\t flags = 0x%02" PRIx8 "\n",
+		     reinterpret_cast<uint64_t>(packet->addr), packet->dw_num, packet->flags);
+	}
 
 	submit_acb(queue, packet->addr, packet->dw_num);
 	return OK;
@@ -4368,9 +4392,11 @@ int KYTY_SYSV_ABI AgcDriverSubmitMultiAcbs(uint32_t queue, uint32_t* const* acbs
                                            const uint32_t* sizes_in_dwords, uint32_t count) {
 	PRINT_NAME();
 
-	LOGF("\t queue = 0x%08" PRIx32 "\n"
-	     "\t count = %" PRIu32 "\n",
-	     queue, count);
+	if (agc_debug_dump_enabled()) {
+		LOGF("\t queue = 0x%08" PRIx32 "\n"
+		     "\t count = %" PRIu32 "\n",
+		     queue, count);
+	}
 
 	if (count == 0) {
 		return OK;
