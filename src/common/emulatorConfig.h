@@ -3,6 +3,7 @@
 
 #include "common/common.h"
 
+#include <atomic>
 #include <filesystem>
 #include <string>
 #include <vector>
@@ -93,6 +94,21 @@ bool GraphicsDebugDumpEnabled();
 
 OutputDirection       GetPrintfDirection();
 std::filesystem::path GetPrintfOutputFile();
+
+namespace Detail {
+// Inlinable mirrors of two options the draw path reads constantly; the accessors above live in
+// `common` and cannot inline without LTO. Load() keeps these in sync.
+inline std::atomic<bool>            g_graphics_debug_dump_enabled {false};
+inline std::atomic<OutputDirection> g_printf_direction {OutputDirection::Console};
+} // namespace Detail
+
+[[nodiscard]] inline bool GraphicsDebugDumpEnabledFast() noexcept {
+	return Detail::g_graphics_debug_dump_enabled.load(std::memory_order_relaxed);
+}
+
+[[nodiscard]] inline OutputDirection GetPrintfDirectionFast() noexcept {
+	return Detail::g_printf_direction.load(std::memory_order_relaxed);
+}
 
 ProfilerDirection GetProfilerDirection();
 

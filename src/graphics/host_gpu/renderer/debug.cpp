@@ -57,11 +57,6 @@ uint32_t render_target_first_bound_slot(const CommandBuffer& buffer) {
 	return 0;
 }
 
-bool graphics_debug_dump_enabled() {
-	return Config::GraphicsDebugDumpEnabled() &&
-	       Config::GetPrintfDirection() != Config::OutputDirection::Silent;
-}
-
 void uc_print(const char* func, const HW::UserConfig& uc) {
 	LOGF("%s\n", func);
 

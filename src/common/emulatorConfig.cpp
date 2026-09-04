@@ -9,10 +9,17 @@ namespace Config {
 
 static std::unique_ptr<ConfigOptions> g_config;
 
+static void RefreshFastMirrors() {
+	Detail::g_graphics_debug_dump_enabled.store(g_config->graphics_debug_dump_enabled,
+	                                            std::memory_order_relaxed);
+	Detail::g_printf_direction.store(g_config->printf_direction, std::memory_order_relaxed);
+}
+
 void Initialize() {
 	EXIT_IF(g_config != nullptr);
 
 	g_config = std::make_unique<ConfigOptions>();
+	RefreshFastMirrors();
 }
 
 void Shutdown() {
@@ -23,6 +30,7 @@ void Load(const ConfigOptions& cfg) {
 	EXIT_IF(g_config == nullptr);
 
 	*g_config = cfg;
+	RefreshFastMirrors();
 }
 
 uint32_t GetScreenWidth() {
