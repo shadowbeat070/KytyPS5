@@ -377,6 +377,16 @@ static void SetGraphicsDynamicParams(const CommandBuffer& buffer, vk::CommandBuf
 		vk_buffer.setDepthBias(constant_factor, poly_offset.clamp, slope_factor);
 	}
 
+	// Dynamic so the guest can animate either without forcing a new pipeline. A pipeline that does
+	// not declare the state ignores what was set.
+	const auto& blend_color = ctx.GetBlendColor();
+	const float blend_constants[4] = {blend_color.red, blend_color.green, blend_color.blue,
+	                                  blend_color.alpha};
+	vk_buffer.setBlendConstants(blend_constants);
+	if (buffer.GetGraphics().depth_bounds_enabled && depth.depth_bounds_test_enable) {
+		vk_buffer.setDepthBounds(depth.depth_min_bounds, depth.depth_max_bounds);
+	}
+
 	if (depth.stencil_test_enable) {
 		vk_buffer.setStencilCompareMask(vk::StencilFaceFlagBits::eFront,
 		                                depth.stencil_dynamic_front.compareMask);

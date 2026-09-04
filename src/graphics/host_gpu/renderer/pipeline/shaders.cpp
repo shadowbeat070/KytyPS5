@@ -17,6 +17,7 @@
 #include "graphics/shader/shader.h"
 
 #include <algorithm>
+#include <array>
 #include <limits>
 #include <span>
 #include <vector>
@@ -854,11 +855,8 @@ void CreatePipelineInternal(
 	depth_stencil_info.depthWriteEnable = (static_params.depth_write_enable ? VK_TRUE : VK_FALSE);
 	depth_stencil_info.depthCompareOp   = static_params.depth_compare_op;
 	depth_stencil_info.depthBoundsTestEnable =
-#if defined(__APPLE__)
-	    VK_FALSE; // MoltenVK lacks the depthBounds feature; depth-bounds testing is disabled
-#else
-	    (static_params.depth_bounds_test_enable ? VK_TRUE : VK_FALSE);
-#endif
+	    (graphics.depth_bounds_enabled && static_params.depth_bounds_test_enable) ? VK_TRUE
+	                                                                             : VK_FALSE;
 	depth_stencil_info.stencilTestEnable = (static_params.stencil_test_enable ? VK_TRUE : VK_FALSE);
 	depth_stencil_info.front.failOp      = static_params.stencil_front.failOp;
 	depth_stencil_info.front.passOp      = static_params.stencil_front.passOp;
@@ -871,25 +869,29 @@ void CreatePipelineInternal(
 	depth_stencil_info.minDepthBounds    = static_params.depth_min_bounds;
 	depth_stencil_info.maxDepthBounds    = static_params.depth_max_bounds;
 
-	const vk::DynamicState dynamic_states[] = {
-	    vk::DynamicState::eViewport,
-	    vk::DynamicState::eScissor,
-	    vk::DynamicState::eLineWidth,
-	    vk::DynamicState::eDepthBiasEnable,
-	    vk::DynamicState::eDepthBias,
-	    vk::DynamicState::eStencilCompareMask,
-	    vk::DynamicState::eStencilReference,
-	    vk::DynamicState::eStencilWriteMask,
-#if !defined(__APPLE__)
-	    // Keep last so depth-only pipelines can omit this dynamic state.
-	    vk::DynamicState::eColorWriteEnableEXT, // unsupported by MoltenVK; static mask instead
-#endif
+	std::array<vk::DynamicState, 12> dynamic_states {};
+	uint32_t                         dynamic_states_count = 0;
+	const auto add_dynamic_state = [&dynamic_states,
+	                                &dynamic_states_count](vk::DynamicState state) {
+		EXIT_IF(dynamic_states_count >= dynamic_states.size());
+		dynamic_states[dynamic_states_count++] = state;
 	};
-	auto dynamic_states_count =
-	    static_cast<uint32_t>(sizeof(dynamic_states) / sizeof(dynamic_states[0]));
+	add_dynamic_state(vk::DynamicState::eViewport);
+	add_dynamic_state(vk::DynamicState::eScissor);
+	add_dynamic_state(vk::DynamicState::eLineWidth);
+	add_dynamic_state(vk::DynamicState::eDepthBiasEnable);
+	add_dynamic_state(vk::DynamicState::eDepthBias);
+	add_dynamic_state(vk::DynamicState::eStencilCompareMask);
+	add_dynamic_state(vk::DynamicState::eStencilReference);
+	add_dynamic_state(vk::DynamicState::eStencilWriteMask);
+	add_dynamic_state(vk::DynamicState::eBlendConstants);
+	if (graphics.depth_bounds_enabled && static_params.with_depth) {
+		add_dynamic_state(vk::DynamicState::eDepthBounds);
+	}
 #if !defined(__APPLE__)
-	if (static_params.color_count == 0) {
-		dynamic_states_count--;
+	if (static_params.color_count != 0) {
+		// Unsupported by MoltenVK; the static mask is used there instead.
+		add_dynamic_state(vk::DynamicState::eColorWriteEnableEXT);
 	}
 #endif
 
@@ -898,7 +900,7 @@ void CreatePipelineInternal(
 	dynamic_state.pNext             = nullptr;
 	dynamic_state.flags             = {};
 	dynamic_state.dynamicStateCount = dynamic_states_count;
-	dynamic_state.pDynamicStates    = dynamic_states;
+	dynamic_state.pDynamicStates    = dynamic_states.data();
 
 	vk::GraphicsPipelineCreateInfo  pipeline_info {};
 	vk::PipelineRenderingCreateInfo rendering_info {};

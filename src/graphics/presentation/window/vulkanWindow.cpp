@@ -641,7 +641,9 @@ static vk::Device VulkanCreateDevice(vk::PhysicalDevice physical_device, const V
 	device_features.samplerAnisotropy        = VK_TRUE;
 	device_features.robustBufferAccess       = VK_TRUE;
 #if !defined(__APPLE__)
-	device_features.depthBounds = VK_TRUE; // unsupported by MoltenVK
+	// Optional; without it depth bounds cannot be dynamic state and stay in the pipeline key.
+	graphics.depth_bounds_enabled = (supported_features2.features.depthBounds == VK_TRUE);
+	device_features.depthBounds   = graphics.depth_bounds_enabled ? VK_TRUE : VK_FALSE;
 #endif
 	device_features.shaderStorageImageWriteWithoutFormat = VK_TRUE;
 	device_features.shaderImageGatherExtended            = VK_TRUE;

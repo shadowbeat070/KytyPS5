@@ -23,7 +23,8 @@ namespace Libs::Graphics {
 
 namespace {
 
-void NormalizeStaticParamsForDynamicState(PipelineStaticParameters& static_params) {
+void NormalizeStaticParamsForDynamicState(PipelineStaticParameters& static_params,
+                                          bool depth_bounds_dynamic) {
 	static_params.viewport_scale[0]  = 0.5f;
 	static_params.viewport_scale[1]  = 0.5f;
 	static_params.viewport_scale[2]  = 1.0f;
@@ -35,6 +36,18 @@ void NormalizeStaticParamsForDynamicState(PipelineStaticParameters& static_param
 	static_params.scissor_ltrb[1] = 0;
 	static_params.scissor_ltrb[2] = 1;
 	static_params.scissor_ltrb[3] = 1;
+
+	// vkCmdSetBlendConstants supplies these; an animated blend constant must not make a pipeline.
+	static_params.blend_color_red   = 0.0f;
+	static_params.blend_color_green = 0.0f;
+	static_params.blend_color_blue  = 0.0f;
+	static_params.blend_color_alpha = 0.0f;
+
+	if (depth_bounds_dynamic || !static_params.with_depth ||
+	    !static_params.depth_bounds_test_enable) {
+		static_params.depth_min_bounds = 0.0f;
+		static_params.depth_max_bounds = 0.0f;
+	}
 }
 
 } // namespace
@@ -356,7 +369,7 @@ PipelineCache::GraphicsPipeline& PipelineCache::CreateGraphicsPipeline(
 	static_params.blend_color_blue  = bclr.blue;
 	static_params.blend_color_alpha = bclr.alpha;
 
-	NormalizeStaticParamsForDynamicState(static_params);
+	NormalizeStaticParamsForDynamicState(static_params, m_graphics.depth_bounds_enabled);
 
 	GraphicsPipelineKey key {};
 	key.rendering     = rendering;

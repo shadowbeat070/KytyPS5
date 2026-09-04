@@ -39,6 +39,7 @@ struct GraphicContext {
 	uint32_t                           max_mesh_shared_memory_size           = 0;
 	uint32_t                           max_mesh_work_group_count[3]          = {};
 	bool                               sample_rate_shading_enabled           = false;
+	bool                               depth_bounds_enabled                  = false;
 	uint32_t                           subgroup_size                         = 0;
 	uint32_t                           min_subgroup_size                     = 0;
 	uint32_t                           max_subgroup_size                     = 0;
