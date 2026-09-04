@@ -637,10 +637,64 @@ IR::U32 Translator::ConditionBit(const Decoder::Operand& operand) {
 	return ir.Select(ReadMask(operand), IR::U32(IR::Value(1u)), IR::U32(IR::Value(0u)));
 }
 
+IR::U32 Translator::WaveLaneId() {
+	if (!current_logical_wave64) {
+		const auto index = IR::U32(
+		    ir.Emit(IR::ValueOpcode::GetBuiltin,
+		            {IR::Value(static_cast<uint32_t>(IR::StageInputKind::LocalInvocationIndex)),
+		             IR::Value(0u)}));
+		const auto wave = current_wave_size == 0u ? 64u : current_wave_size;
+		return ir.BitwiseAnd(index, IR::U32(IR::Value(wave - 1u)));
+	}
+	return IR::U32(ir.Emit(IR::ValueOpcode::LaneId));
+}
+
+// Only waves whose lanes carry a guest lane index qualify; a vertex or pixel wave has none, so a
+// constant mask stays a plain Boolean there.
+bool Translator::WaveHasGuestLaneIndex() const {
+	return current_logical_wave64 || program.stage == ShaderType::Compute;
+}
+
+IR::U1 Translator::ConstantMaskBit(const Decoder::Operand& operand) {
+	// A constant lane mask is bit-per-lane, not a Boolean: `S_MOV_B64 EXEC, 1` leaves only lane 0
+	// active, which is how a wave elects one lane to run a global atomic.
+	if (!WaveHasGuestLaneIndex()) {
+		return IR::U1(IR::Value(operand.value != 0u));
+	}
+	const bool sign_extended =
+	    operand.kind == Decoder::OperandKind::IntegerInlineConstant && operand.signed_val < 0;
+	const uint64_t mask =
+	    static_cast<uint64_t>(operand.value) | (sign_extended ? 0xffffffff00000000ULL : 0ULL);
+	const uint32_t wave      = current_wave_size == 0u ? 64u : current_wave_size;
+	const uint64_t wave_mask = wave >= 64u ? ~uint64_t {0} : ((uint64_t {1} << wave) - 1u);
+	const uint64_t active    = mask & wave_mask;
+	if (active == 0) {
+		return IR::U1(IR::Value(false));
+	}
+	if (active == wave_mask) {
+		return IR::U1(IR::Value(true));
+	}
+	const auto lane = WaveLaneId();
+	const auto low  = IR::U32(IR::Value(static_cast<uint32_t>(active)));
+	const auto high = IR::U32(IR::Value(static_cast<uint32_t>(active >> 32u)));
+	auto       word = low;
+	if (wave > 32u) {
+		const auto high_lane =
+		    IR::U1(ir.Emit(IR::ValueOpcode::UGreaterThanEqual32, {lane, IR::Value(32u)}));
+		word = ir.Select(high_lane, high, low);
+	}
+	const auto bit =
+	    ir.BitwiseAnd(ir.ShiftRightLogical(word, ir.BitwiseAnd(lane, IR::U32(IR::Value(31u)))),
+	                  IR::U32(IR::Value(1u)));
+	return ir.INotEqual(bit, IR::U32(IR::Value(0u)));
+}
+
 IR::U1 Translator::ReadMask(const Decoder::Operand& operand) {
 	if (operand.kind == Decoder::OperandKind::LiteralConstant ||
-	    operand.kind == Decoder::OperandKind::IntegerInlineConstant ||
-	    operand.kind == Decoder::OperandKind::FloatInlineConstant) {
+	    operand.kind == Decoder::OperandKind::IntegerInlineConstant) {
+		return ConstantMaskBit(operand);
+	}
+	if (operand.kind == Decoder::OperandKind::FloatInlineConstant) {
 		return IR::U1(IR::Value(operand.value != 0u));
 	}
 	switch (operand.kind) {

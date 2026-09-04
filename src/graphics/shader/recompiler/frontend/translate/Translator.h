@@ -31,6 +31,9 @@ private:
 	IR::U32                ApplyBitSourceModifiers(const Decoder::Operand& operand, IR::U32 value);
 	IR::Value              ReadOperand(const Decoder::Operand& operand, IR::Type type);
 	IR::U1                 ThreadBit(IR::U32 low, IR::U32 high);
+	IR::U32                WaveLaneId();
+	bool                   WaveHasGuestLaneIndex() const;
+	IR::U1                 ConstantMaskBit(const Decoder::Operand& operand);
 	void                   WriteRawU32(const Decoder::Operand& operand, IR::U32 value);
 	IR::F32                ApplyF32ResultModifiers(const Decoder::Operand& operand, IR::F32 value);
 	void                   WriteOperand(const Decoder::Operand& operand, IR::Value value);

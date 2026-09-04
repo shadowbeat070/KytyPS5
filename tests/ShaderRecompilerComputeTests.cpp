@@ -18550,6 +18550,64 @@ TestCase BufferAtomicGlc0DoesNotReturnOldValue() {
       {O::V_MOV_B32, O::BUFFER_ATOMIC_ADD, O::BUFFER_STORE_DWORD, O::S_ENDPGM}};
 }
 
+// A constant written to a lane mask is a bit-per-lane value, not a Boolean. `S_MOV_B64 EXEC, 1`
+// is how a wave elects lane 0 to run a single global atomic on behalf of the whole wave (a GPU
+// culling pass allocating its output range, for instance). Treating the constant as "every lane
+// is active" ran that atomic 64 times and inflated the allocated count by the wave width.
+TestCase ConstantExecMaskElectsLaneZero() {
+  using O = ShaderOpcode;
+
+  std::vector<u32> code;
+  AppendVMovU32(&code, 20, 0);
+  AppendVMovU32(&code, 0, 1);
+  code.push_back(EncodeSop1(0x04u, 126u, InlineU32(1))); // s_mov_b64 exec, 1
+  AppendBufferStoreOpcode(&code, 0x32u, 0, 20);          // buffer_atomic_add
+  code.push_back(EncodeSop1(0x04u, 126u, 193u));         // s_mov_b64 exec, -1
+  AppendEnd(&code);
+
+  TestCase test;
+  test.name = "ConstantExecMaskElectsLaneZero";
+  test.code = code;
+  test.initial = {0};
+  test.expected = {1};
+  test.opcodes = {O::V_MOV_B32, O::S_MOV_B64, O::BUFFER_ATOMIC_ADD, O::S_ENDPGM};
+  test.compute_info.threads_num[0] = 64;
+  test.compute_info.threads_num[1] = 1;
+  test.compute_info.threads_num[2] = 1;
+  test.compute_info.thread_ids_num = 1;
+  test.compute_info.wave_size = 64;
+  test.has_compute_info = true;
+  test.required_spirv = {"BuiltIn LocalInvocationIndex"};
+  return test;
+}
+
+// The partner case: an all-ones constant mask still has to leave every lane running, so the fix
+// above cannot be "predicate everything on lane 0".
+TestCase ConstantExecMaskAllOnesKeepsEveryLane() {
+  using O = ShaderOpcode;
+
+  std::vector<u32> code;
+  AppendVMovU32(&code, 20, 0);
+  AppendVMovU32(&code, 0, 1);
+  code.push_back(EncodeSop1(0x04u, 126u, 193u)); // s_mov_b64 exec, -1
+  AppendBufferStoreOpcode(&code, 0x32u, 0, 20);  // buffer_atomic_add
+  AppendEnd(&code);
+
+  TestCase test;
+  test.name = "ConstantExecMaskAllOnesKeepsEveryLane";
+  test.code = code;
+  test.initial = {0};
+  test.expected = {64};
+  test.opcodes = {O::V_MOV_B32, O::S_MOV_B64, O::BUFFER_ATOMIC_ADD, O::S_ENDPGM};
+  test.compute_info.threads_num[0] = 64;
+  test.compute_info.threads_num[1] = 1;
+  test.compute_info.threads_num[2] = 1;
+  test.compute_info.thread_ids_num = 1;
+  test.compute_info.wave_size = 64;
+  test.has_compute_info = true;
+  return test;
+}
+
 TestCase BufferAtomicFMinExactRawGlcModes() {
   using O = ShaderOpcode;
 
@@ -20652,6 +20710,8 @@ std::vector<TestCase> MakeCases() {
   AddCase(DsSwizzleInvalidSourceLaneZero);
   AddCase(BufferAtomicVariants);
   AddCase(BufferAtomicGlc0DoesNotReturnOldValue);
+  AddCase(ConstantExecMaskElectsLaneZero);
+  AddCase(ConstantExecMaskAllOnesKeepsEveryLane);
   AddCase(BufferAtomicFMinExactRawGlcModes);
   AddCase(BufferAtomicFMinSpecialValues);
   AddCase(BufferAtomicFMinContendedWorkgroup);
