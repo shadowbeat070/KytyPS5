@@ -255,7 +255,8 @@ bool ShaderComputeMeshDispatch(uint32_t total_primitives, uint32_t vertices_per_
 	out.output_vertices_per_workgroup = primitives * output_vertices_per_primitive;
 	out.output_primitives_per_workgroup =
 	    primitives * MeshOutputPrimitivesPerPrimitive(output_vertices_per_primitive);
-	out.workgroup_count = (total_primitives + primitives - 1) / primitives;
+	out.workgroup_count  = (total_primitives + primitives - 1) / primitives;
+	out.total_primitives = total_primitives;
 
 	const uint32_t remainder = total_primitives % primitives;
 	out.last_primitives       = remainder == 0 ? primitives : remainder;

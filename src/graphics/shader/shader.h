@@ -95,9 +95,6 @@ struct ShaderVertexInputInfo {
 
 	uint32_t                mesh_vertices_per_workgroup   = 0;
 	uint32_t                mesh_primitives_per_workgroup = 0;
-	uint32_t                mesh_last_group_index         = 0;
-	uint32_t                mesh_last_vertices            = 0;
-	uint32_t                mesh_last_primitives          = 0;
 	uint32_t                mesh_output_vertices          = 0;
 	uint32_t                mesh_output_primitives        = 0;
 	uint32_t                mesh_topology                 = 0;

@@ -1092,20 +1092,8 @@ bool EmitValueMemory(ValueEmitContext& ctx, const IR::Inst& inst) {
 			ctx.Fail(inst, "requires the mesh index descriptor");
 			return true;
 		}
-		auto        index = ctx.Arg(inst, 0);
-		const auto* mesh  = state.input_info.vertex;
-		if (mesh != nullptr) {
-			const uint64_t total = static_cast<uint64_t>(mesh->mesh_last_group_index) *
-			                           mesh->mesh_vertices_per_workgroup +
-			                       mesh->mesh_last_vertices;
-			if (total > 0) {
-				const auto clamped = state.builder.AllocateId();
-				state.builder.AddFunction(
-				    {OpExtInst, TypeU32(state), clamped, GlslStd450(state), GlslUMin, index,
-				     ConstantU32(state, static_cast<uint32_t>(total - 1))});
-				index = clamped;
-			}
-		}
+		// The caller clamps the position against the draw's runtime vertex count.
+		const auto index   = ctx.Arg(inst, 0);
 		const auto pointer = state.builder.AllocateId();
 		state.builder.AddFunction({OpAccessChain, TypeStorageBufferElementPointer(state), pointer,
 		                           state.mesh_index_variable, ConstantU32(state, 0), index});

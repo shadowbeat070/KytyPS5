@@ -944,13 +944,10 @@ void BuildStageStaticKey(const ShaderVertexInputInfo& info, std::vector<uint32_t
 		}
 	}
 
-	// A mesh permutation bakes its launch state into the program, so two dispatches of the
-	// same ES+GS pair with different geometry are different programs.
+	// Only the launch shape belongs in the key; the draw's size arrives as a launch scalar, so
+	// dispatches of the same ES+GS pair share one program.
 	key.push_back(info.mesh_vertices_per_workgroup);
 	key.push_back(info.mesh_primitives_per_workgroup);
-	key.push_back(info.mesh_last_group_index);
-	key.push_back(info.mesh_last_vertices);
-	key.push_back(info.mesh_last_primitives);
 	key.push_back(info.mesh_output_vertices);
 	key.push_back(info.mesh_output_primitives);
 	key.push_back(info.mesh_topology);
@@ -1437,13 +1434,15 @@ struct MergedGeometryScalars {
 	[[nodiscard]] std::span<const uint32_t> Span() const { return {value.data(), count}; }
 };
 
-static MergedGeometryScalars MergedGeometryUserData(const HW::VertexShaderInfo& regs) {
+static MergedGeometryScalars MergedGeometryUserData(const HW::VertexShaderInfo& regs,
+                                                    const MeshDispatch&         dispatch) {
 	MergedGeometryScalars out;
 	const auto            user_count = std::min<uint32_t>(
 	               std::max(static_cast<uint32_t>(regs.gs_regs.rsrc2.user_sgpr), regs.gs_user_sgpr.count),
 	               HW::UserSgprInfo::SGPRS_MAX);
 	out.value[0] = regs.gs_user_data_addr[0];
 	out.value[1] = regs.gs_user_data_addr[1];
+	out.value[MeshLaunchPrimitiveCountSgpr] = dispatch.total_primitives;
 	for (uint32_t i = 0; i < user_count; i++) {
 		out.value[MergedGeometryScalars::LaunchSgprCount + i] = regs.gs_user_sgpr.value[i];
 	}
@@ -1492,9 +1491,6 @@ bool PrepareMeshProgram(const HW::VertexShaderInfo& regs, const HW::ShaderRegist
 	info.wave_size                     = 64;
 	info.mesh_vertices_per_workgroup   = dispatch.vertices_per_workgroup;
 	info.mesh_primitives_per_workgroup = dispatch.primitives_per_workgroup;
-	info.mesh_last_group_index         = dispatch.workgroup_count - 1;
-	info.mesh_last_vertices            = dispatch.last_vertices;
-	info.mesh_last_primitives          = dispatch.last_primitives;
 	info.mesh_output_vertices          = dispatch.output_vertices_per_workgroup;
 	info.mesh_output_primitives        = dispatch.output_primitives_per_workgroup;
 	info.mesh_topology                 = static_cast<uint32_t>(topology);
@@ -1504,7 +1500,7 @@ bool PrepareMeshProgram(const HW::VertexShaderInfo& regs, const HW::ShaderRegist
 
 	// The launch window is synthesised rather than read out of a register file, so the caller
 	// owns it and `params` only views it.
-	const auto scalars = MergedGeometryUserData(regs);
+	const auto scalars = MergedGeometryUserData(regs, dispatch);
 	user_data.assign(scalars.Span().begin(), scalars.Span().end());
 	params.user_data     = user_data;
 	params.hash          = regs.gs_regs.chksum;

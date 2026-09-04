@@ -12424,9 +12424,6 @@ void TestVertexOnlyNggCompilesAsMeshWave64() {
   mesh_info.wave_size = 64;
   mesh_info.mesh_vertices_per_workgroup = 63;
   mesh_info.mesh_primitives_per_workgroup = 21;
-  mesh_info.mesh_last_group_index = 3;
-  mesh_info.mesh_last_vertices = 63;
-  mesh_info.mesh_last_primitives = 21;
   mesh_info.mesh_output_vertices = 63;
   mesh_info.mesh_output_primitives = 21;
   mesh_info.mesh_topology =

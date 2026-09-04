@@ -47,6 +47,8 @@ enum class MeshInputTopology { TriangleList, TriangleStrip };
 
 struct MeshDispatch {
 	uint32_t workgroup_count = 0;
+	// The whole draw's primitive count, passed as a launch scalar rather than baked in.
+	uint32_t total_primitives = 0;
 	uint32_t vertices_per_workgroup   = 0;
 	uint32_t primitives_per_workgroup = 0;
 	uint32_t last_vertices   = 0;
@@ -58,6 +60,9 @@ struct MeshDispatch {
 [[nodiscard]] inline uint32_t MeshOutputPrimitivesPerPrimitive(uint32_t output_vertices) {
 	return output_vertices >= 3u ? output_vertices - 2u : 1u;
 }
+
+// SPI merged wave info. The translator rebuilds it, so this slot carries the primitive count.
+inline constexpr uint32_t MeshLaunchPrimitiveCountSgpr = 3;
 
 // SPI_SHADER_PGM_RSRC2_GS.LDS_SIZE counts 128-dword granules, the same unit compute uses.
 inline constexpr uint32_t MeshLdsGranuleDwords = 128;

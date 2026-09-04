@@ -24019,9 +24019,6 @@ void CheckMeshStageRecompile() {
   vertex.wave_size = 64;
   vertex.mesh_vertices_per_workgroup = 4;
   vertex.mesh_primitives_per_workgroup = 2;
-  vertex.mesh_last_group_index = 0;
-  vertex.mesh_last_vertices = 4;
-  vertex.mesh_last_primitives = 2;
   vertex.mesh_output_vertices = 4;
   vertex.mesh_output_primitives = 2;
   vertex.mesh_topology =

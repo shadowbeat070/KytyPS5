@@ -1157,14 +1157,20 @@ bool TranslateProgram(const Decoder::Program& decoded, const CFG::Graph& cfg,
 				return Fail(
 				    error, "a mesh workgroup's vertices must divide evenly among its primitives");
 			}
-			const auto group   = builtin(IR::StageInputKind::WorkgroupId, 0);
-			const auto is_last = entry_ir.IEqual(group, IR::U32(IR::Value(vs->mesh_last_group_index)));
+			const auto verts_per_prim =
+			    vs->mesh_vertices_per_workgroup / vs->mesh_primitives_per_workgroup;
+			const auto group = builtin(IR::StageInputKind::WorkgroupId, 0);
+			// Baking the count in instead would make every draw size its own program.
+			const auto total_primitives =
+			    entry_ir.GetUserData(static_cast<IR::ScalarReg>(MeshLaunchPrimitiveCountSgpr));
+			const auto consumed =
+			    entry_ir.IMul(group, IR::U32(IR::Value(vs->mesh_primitives_per_workgroup)));
+			const auto remaining = entry_ir.ISub(total_primitives, consumed);
+			const auto primitive_count = entry_ir.Select(
+			    entry_ir.ULessThan(remaining, IR::U32(IR::Value(vs->mesh_primitives_per_workgroup))),
+			    remaining, IR::U32(IR::Value(vs->mesh_primitives_per_workgroup)));
 			const auto vertex_count =
-			    entry_ir.Select(is_last, IR::U32(IR::Value(vs->mesh_last_vertices)),
-			                    IR::U32(IR::Value(vs->mesh_vertices_per_workgroup)));
-			const auto primitive_count =
-			    entry_ir.Select(is_last, IR::U32(IR::Value(vs->mesh_last_primitives)),
-			                    IR::U32(IR::Value(vs->mesh_primitives_per_workgroup)));
+			    entry_ir.IMul(primitive_count, IR::U32(IR::Value(verts_per_prim)));
 			entry_ir.SetScalarReg(
 			    static_cast<IR::ScalarReg>(3),
 			    entry_ir.BitwiseOr(
@@ -1177,8 +1183,6 @@ bool TranslateProgram(const Decoder::Program& decoded, const CFG::Graph& cfg,
 			const auto slot = entry_ir.IAdd(
 			    entry_ir.IMul(group, IR::U32(IR::Value(vs->mesh_vertices_per_workgroup))), lane);
 
-			const auto verts_per_prim =
-			    vs->mesh_vertices_per_workgroup / vs->mesh_primitives_per_workgroup;
 			IR::U32 index_position = slot;
 			if (static_cast<MeshInputTopology>(vs->mesh_topology) ==
 			    MeshInputTopology::TriangleStrip) {
@@ -1190,10 +1194,18 @@ bool TranslateProgram(const Decoder::Program& decoded, const CFG::Graph& cfg,
 				                                     corner, entry_ir.BitwiseXor(corner, swap));
 				index_position     = entry_ir.IAdd(prim, swapped);
 			}
-			const auto vertex_index =
-			    vs->mesh_indexed
-			        ? IR::U32(entry_ir.Emit(IR::ValueOpcode::ReadMeshIndex, {index_position}))
-			        : index_position;
+			IR::U32 vertex_index = index_position;
+			if (vs->mesh_indexed) {
+				// Lanes past the tail still reach this, so keep the fetch inside the buffer.
+				const auto total_vertices =
+				    entry_ir.IMul(total_primitives, IR::U32(IR::Value(verts_per_prim)));
+				const auto last_vertex = entry_ir.ISub(total_vertices, IR::U32(IR::Value(1u)));
+				const auto safe_position =
+				    entry_ir.Select(entry_ir.ULessThan(index_position, total_vertices),
+				                    index_position, last_vertex);
+				vertex_index =
+				    IR::U32(entry_ir.Emit(IR::ValueOpcode::ReadMeshIndex, {safe_position}));
+			}
 			entry_ir.SetVectorReg(static_cast<IR::VectorReg>(5), vertex_index);
 
 			entry_ir.SetVectorReg(static_cast<IR::VectorReg>(8),
