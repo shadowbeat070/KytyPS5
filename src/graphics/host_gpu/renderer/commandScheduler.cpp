@@ -182,6 +182,7 @@ void CommandScheduler::Flush() {
 void CommandScheduler::Flush(SubmitInfo& submit) {
 	Submit(submit);
 	BeginNext();
+	PopPendingOperations();
 }
 
 void CommandScheduler::FlushAndWait() {
@@ -218,6 +219,10 @@ void CommandScheduler::Wait(uint64_t tick) {
 
 void CommandScheduler::PopPendingOperations() {
 	PopPendingOperations(true);
+}
+
+void CommandScheduler::PopCompletedOperations() {
+	PopPendingOperations(false);
 }
 
 void CommandScheduler::PopPendingOperations(bool refresh_gpu_tick) {

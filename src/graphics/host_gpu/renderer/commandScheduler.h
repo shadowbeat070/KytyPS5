@@ -36,6 +36,9 @@ public:
 	void                      Shutdown();
 	void                      Wait(uint64_t tick);
 	void                      PopPendingOperations();
+	// Drains against the last observed GPU tick, no vkGetSemaphoreCounterValue round-trip. A
+	// stale tick only ever retires fewer operations, never more.
+	void                      PopCompletedOperations();
 	void                      DrainPriorityOperations();
 	void                      WaitPriorityOperations(uint64_t tick);
 	void                      DeferOperation(Common::UniqueFunction<void>&& operation);
