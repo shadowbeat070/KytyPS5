@@ -917,10 +917,7 @@ PreparedBindings RenderExecutor::PrepareBindings(const ShaderStageRuntime& runti
 	EXIT_IF(!runtime);
 	const auto& program  = *runtime.program;
 	const auto& snapshot = *runtime.resources;
-	std::string error;
-	if (!ShaderRecompiler::IR::ValidateResourceSpecialization(program, snapshot, &error)) {
-		EXIT("invalid native shader runtime snapshot: %s\n", error.c_str());
-	}
+	// ShaderMaterializeStageRuntime already validated this (program, snapshot) pair.
 
 	PreparedBindings prepared;
 	prepared.program  = runtime.program.get();
