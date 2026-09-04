@@ -100,7 +100,30 @@ CollectShaderBufferWrites(const ShaderRecompiler::IR::Program&          program,
 
 bool HasShaderBufferWrites(const ShaderStageRuntime& runtime) {
 	EXIT_IF(!runtime);
-	return !CollectShaderBufferWrites(*runtime.program, *runtime.resources).empty();
+	// As !CollectShaderBufferWrites(...).empty(), without building the vector once per stage.
+	const auto& program   = *runtime.program;
+	const auto& resources = *runtime.resources;
+	EXIT_IF(resources.buffers.size() != program.info.buffers.size());
+	for (uint32_t i = 0; i < program.info.buffers.size(); i++) {
+		if (!program.info.buffers[i].written) {
+			continue;
+		}
+		const auto& value = resources.buffers[i];
+		EXIT_IF(value.dword_count < 4);
+		ShaderBufferResource descriptor;
+		std::memcpy(descriptor.fields, value.dwords.data(), sizeof(descriptor.fields));
+		const auto address = descriptor.Base48();
+		const auto records = static_cast<uint64_t>(descriptor.NumRecords());
+		const auto stride  = static_cast<uint64_t>(descriptor.Stride());
+		if (stride != 0 && records > UINT64_MAX / stride) {
+			EXIT("shader resource barrier buffer footprint overflow\n");
+		}
+		const auto size = stride == 0 ? records : stride * records;
+		if (address != 0 && size != 0) {
+			return true;
+		}
+	}
+	return false;
 }
 
 void ShaderAccessBarrier(vk::CommandBuffer vk_buffer, vk::PipelineStageFlags source_stages) {
